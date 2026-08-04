@@ -1,0 +1,325 @@
+import CSharedMemory
+import Foundation
+import SharedMemoryRuntime
+import XCTest
+
+@testable import SharedMemoryCore
+
+#if canImport(Darwin)
+  import Darwin
+#else
+  import Glibc
+#endif
+
+private final class Locked<Value>: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value: Value
+
+  init(_ value: Value) { self.value = value }
+
+  func withValue<R>(_ body: (inout Value) -> R) -> R {
+    lock.lock()
+    defer { lock.unlock() }
+    return body(&value)
+  }
+
+  func snapshot() -> Value { withValue { $0 } }
+}
+
+private final class IntegrationEnvironment: @unchecked Sendable {
+  static let shared = IntegrationEnvironment()
+
+  let names: RuntimeNames
+  let root: SharedMemory
+
+  private init() {
+    let instance =
+      "tests-\(ProcessInfo.processInfo.processIdentifier)-\(UInt64.random(in: 1...UInt64.max))"
+    setenv("SMR_INSTANCE_ID", instance, 1)
+    setenv("SMR_MEMORY_BYTES", "33554432", 1)
+    names = RuntimeNames()
+    root = SharedMemory(
+      creator: true,
+      name: "test-root",
+      conveyor: [
+        ["source", "middle", "sink"],
+        ["reconnect-source", "reconnect-sink"],
+        ["send-source", "send-sink"],
+      ]
+    )
+    precondition(root.isConnected, "Integration daemon did not start")
+  }
+
+  func stopDaemon() {
+    root.receiveHandler = nil
+    root.notificationHandler = nil
+    guard let region = MappedRegion.open(name: names.sharedMemory) else { return }
+    let pid = smr_daemon_pid(region.baseAddress)
+    if pid > 0 { _ = kill(pid, SIGTERM) }
+    let deadline = smr_monotonic_nanoseconds() + 2_000_000_000
+    while smr_pid_is_alive(pid) == 1, smr_monotonic_nanoseconds() < deadline {
+      smr_sleep_nanoseconds(1_000_000)
+    }
+  }
+}
+
+final class SharedMemoryRuntimeTests: XCTestCase {
+  private static let serializationLock = NSLock()
+  private var environment: IntegrationEnvironment!
+
+  override func setUp() {
+    super.setUp()
+    Self.serializationLock.lock()
+    environment = .shared
+    environment.root.receiveHandler = nil
+    environment.root.notificationHandler = nil
+  }
+
+  override func tearDown() {
+    environment.root.receiveHandler = nil
+    environment.root.notificationHandler = nil
+    environment = nil
+    Self.serializationLock.unlock()
+    super.tearDown()
+  }
+
+  override class func tearDown() {
+    IntegrationEnvironment.shared.stopDaemon()
+    super.tearDown()
+  }
+
+  func testFilesystemCreatesParentsAndReturnsSnapshots() {
+    struct Settings: Codable, Equatable {
+      let theme: String
+      let scale: Double
+    }
+    let expected = Settings(theme: "dark", scale: 1.5)
+    XCTAssertTrue(environment.root.write(path: "/users/me/settings", value: expected))
+    let value: Settings? = environment.root.read(path: "/users/me/settings")
+    XCTAssertEqual(value, expected)
+    let normalized: Settings? = environment.root.read(path: "/users//me/./settings")
+    XCTAssertEqual(normalized, expected)
+    let missing: Settings? = environment.root.read(path: "/missing")
+    XCTAssertNil(missing)
+    XCTAssertFalse(environment.root.write(path: "relative", value: expected))
+  }
+
+  func testNotificationsAreDeliveredForEveryCommittedChange() {
+    let path = "/notifications/\(UUID().uuidString)"
+    let expectation = expectation(description: "three notifications")
+    expectation.expectedFulfillmentCount = 3
+    let received = Locked<[String]>([])
+    environment.root.notificationHandler = { changedPath in
+      received.withValue { $0.append(changedPath) }
+      expectation.fulfill()
+    }
+    XCTAssertTrue(environment.root.notify(path: path))
+    let writer = SharedMemory(name: "writer-\(UUID().uuidString)")
+    XCTAssertTrue(writer.isConnected)
+    for value in 0..<3 { XCTAssertTrue(writer.write(path: path, value: value)) }
+    wait(for: [expectation], timeout: 5)
+    XCTAssertEqual(received.snapshot(), [path, path, path])
+  }
+
+  func testPipelineOrderingAndUUIDContinuity() {
+    let source = SharedMemory(name: "source")
+    let middle = SharedMemory(name: "middle")
+    let sink = SharedMemory(name: "sink")
+    XCTAssertTrue(source.isConnected && middle.isConnected && sink.isConnected)
+
+    let completed = expectation(description: "pipeline completed")
+    let ids = Locked<[UUID]>([])
+    let values = Locked<[Int]>([])
+    let successes = Locked<[Bool]>([])
+    source.setReceiveHandler(for: Int.self) { [weak source] uuid, value in
+      ids.withValue { $0.append(uuid) }
+      values.withValue { $0.append(value) }
+      successes.withValue { $0.append(source?.pass([value + 1]) == true) }
+    }
+    middle.setReceiveHandler(for: Int.self) { [weak middle] uuid, value in
+      ids.withValue { $0.append(uuid) }
+      values.withValue { $0.append(value) }
+      successes.withValue { $0.append(middle?.pass([value + 1]) == true) }
+    }
+    sink.setReceiveHandler(for: Int.self) { [weak sink] uuid, value in
+      ids.withValue { $0.append(uuid) }
+      values.withValue { $0.append(value) }
+      successes.withValue { $0.append(sink?.finish(uuid: uuid) == true) }
+      completed.fulfill()
+    }
+
+    XCTAssertTrue(environment.root.send(to: "source", values: [10]))
+    wait(for: [completed], timeout: 5)
+    XCTAssertEqual(values.snapshot(), [10, 11, 12])
+    XCTAssertEqual(Set(ids.snapshot()).count, 1)
+    XCTAssertEqual(successes.snapshot(), [true, true, true])
+  }
+
+  func testStressReceiveCallbacksAreSerialAndInBatchOrder() {
+    let sink = SharedMemory(name: "send-sink")
+    XCTAssertTrue(sink.isConnected)
+    let count = 500
+    let expectation = expectation(description: "ordered batch")
+    expectation.expectedFulfillmentCount = count
+    let received = Locked<[Int]>([])
+    let activeCallbacks = Locked(0)
+    let maximumCallbacks = Locked(0)
+    sink.setReceiveHandler(for: Int.self) { [weak sink] uuid, value in
+      let active = activeCallbacks.withValue { current -> Int in
+        current += 1
+        return current
+      }
+      maximumCallbacks.withValue { $0 = max($0, active) }
+      received.withValue { $0.append(value) }
+      _ = sink?.finish(uuid: uuid)
+      activeCallbacks.withValue { $0 -= 1 }
+      expectation.fulfill()
+    }
+    XCTAssertTrue(environment.root.send(to: "send-sink", values: Array(0..<count)))
+    wait(for: [expectation], timeout: 10)
+    XCTAssertEqual(received.snapshot(), Array(0..<count))
+    XCTAssertEqual(maximumCallbacks.snapshot(), 1)
+  }
+
+  func testUnchangedPassReusesTheExistingSharedPayloadBlock() {
+    struct Blob: Codable, Equatable {
+      let id: Int
+      let bytes: Data
+    }
+    let source = SharedMemory(name: "send-source")
+    let sink = SharedMemory(name: "send-sink")
+    XCTAssertTrue(source.isConnected && sink.isConnected)
+    let completed = expectation(description: "zero-copy pass completed")
+    let measurements = Locked<(before: UInt64, after: UInt64)?>(nil)
+    source.setReceiveHandler(for: Blob.self) { [weak source] _, value in
+      guard let source else { return }
+      let before = source.memoryUsed()
+      let succeeded = source.pass([value])
+      let after = source.memoryUsed()
+      if succeeded { measurements.withValue { $0 = (before, after) } }
+    }
+    sink.setReceiveHandler(for: Blob.self) { [weak sink] uuid, _ in
+      _ = sink?.finish(uuid: uuid)
+      completed.fulfill()
+    }
+    let value = Blob(id: 1, bytes: Data(repeating: 0x7f, count: 1 << 20))
+    XCTAssertTrue(environment.root.send(to: "send-source", values: [value]))
+    wait(for: [completed], timeout: 5)
+    guard let result = measurements.snapshot() else {
+      XCTFail("pass did not complete")
+      return
+    }
+    XCTAssertEqual(result.before, result.after)
+  }
+
+  func testBucketSurvivesDisconnectAndReconnect() {
+    let firstDelivery = expectation(description: "first delivery")
+    let firstUUID = Locked<UUID?>(nil)
+    var first: SharedMemory? = SharedMemory(name: "reconnect-sink")
+    XCTAssertTrue(first?.isConnected == true)
+    first?.setReceiveHandler(for: Int.self) { uuid, _ in
+      firstUUID.withValue { $0 = uuid }
+      firstDelivery.fulfill()
+    }
+    XCTAssertTrue(environment.root.send(to: "reconnect-sink", values: [1]))
+    wait(for: [firstDelivery], timeout: 5)
+    let usedBeforeDisconnect = environment.root.memoryUsed()
+    first?.disconnect()
+    first = nil
+    let usedAfterDisconnect = environment.root.memoryUsed()
+    XCTAssertEqual(
+      usedAfterDisconnect, usedBeforeDisconnect, "disconnect released an unfinished item payload")
+
+    XCTAssertTrue(environment.root.send(to: "reconnect-sink", values: [2]))
+    XCTAssertGreaterThan(environment.root.memoryUsed(), usedAfterDisconnect)
+    let reconnected = SharedMemory(name: "reconnect-sink")
+    XCTAssertTrue(reconnected.isConnected)
+    let redelivery = expectation(description: "pending items redelivered")
+    redelivery.expectedFulfillmentCount = 2
+    let values = Locked<[Int]>([])
+    let ids = Locked<[UUID]>([])
+    reconnected.setReceiveHandler(for: Int.self) { [weak reconnected] uuid, value in
+      ids.withValue { $0.append(uuid) }
+      values.withValue { $0.append(value) }
+      _ = reconnected?.finish(uuid: uuid)
+      redelivery.fulfill()
+    }
+    wait(for: [redelivery], timeout: 5)
+    XCTAssertEqual(values.snapshot(), [1, 2])
+    XCTAssertEqual(ids.snapshot().first, firstUUID.snapshot())
+  }
+
+  func testDuplicateNamesAreRejectedAndReusableAfterDisconnect() {
+    let name = "duplicate-\(UUID().uuidString)"
+    var first: SharedMemory? = SharedMemory(name: name)
+    XCTAssertTrue(first?.isConnected == true)
+    let duplicate = SharedMemory(name: name)
+    XCTAssertFalse(duplicate.isConnected)
+    first?.disconnect()
+    first = nil
+    let replacement = SharedMemory(name: name)
+    XCTAssertTrue(replacement.isConnected)
+  }
+
+  func testConcurrentReadersNeverObservePartialWrites() {
+    struct Invariant: Codable {
+      let value: Int
+      let complement: Int
+    }
+    let path = "/synchronization/value"
+    XCTAssertTrue(environment.root.write(path: path, value: Invariant(value: 0, complement: ~0)))
+    let failures = Locked(0)
+    let group = DispatchGroup()
+    let queue = DispatchQueue(label: "SharedMemoryRuntimeTests.contention", attributes: .concurrent)
+    for worker in 0..<8 {
+      group.enter()
+      queue.async { [root = environment.root] in
+        defer { group.leave() }
+        for iteration in 0..<250 {
+          if worker % 2 == 0 {
+            let value = worker * 10_000 + iteration
+            if !root.write(path: path, value: Invariant(value: value, complement: ~value)) {
+              failures.withValue { $0 += 1 }
+            }
+          } else {
+            let value: Invariant? = root.read(path: path)
+            if let value, value.complement != ~value.value {
+              failures.withValue { $0 += 1 }
+            }
+          }
+        }
+      }
+    }
+    XCTAssertEqual(group.wait(timeout: .now() + 20), .success)
+    XCTAssertEqual(failures.snapshot(), 0)
+  }
+
+  func testCheckpointContainsCompleteBinaryFilesystemValues() throws {
+    struct Record: Codable, Equatable {
+      let name: String
+      let values: [Int]
+    }
+    let path = "/checkpoint/\(UUID().uuidString)"
+    let record = Record(name: "complete", values: Array(0..<100))
+    XCTAssertTrue(environment.root.write(path: path, value: record))
+    let diskPath = "/tmp/smr-checkpoint-\(UUID().uuidString).bin"
+    defer { try? FileManager.default.removeItem(atPath: diskPath) }
+    XCTAssertTrue(environment.root.checkpoint(path: diskPath))
+    let archive = try Data(contentsOf: URL(fileURLWithPath: diskPath))
+    let entries = try XCTUnwrap(CheckpointArchive.decode(archive))
+    let entry = try XCTUnwrap(entries.first { $0.path == path })
+    let decoded: Record = try entry.payload.withUnsafeBytes {
+      try BinaryCodable.decode(Record.self, from: $0)
+    }
+    XCTAssertEqual(decoded, record)
+  }
+
+  func testFullMemoryReturnsFalseWithoutEviction() {
+    let preservedPath = "/capacity/preserved"
+    XCTAssertTrue(environment.root.write(path: preservedPath, value: "keep"))
+    let oversized = Data(repeating: 0xab, count: 40 << 20)
+    XCTAssertFalse(environment.root.write(path: "/capacity/too-large", value: oversized))
+    let preserved: String? = environment.root.read(path: preservedPath)
+    XCTAssertEqual(preserved, "keep")
+  }
+}

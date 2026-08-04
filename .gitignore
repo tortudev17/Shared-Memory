@@ -1,0 +1,8 @@
+.build/
+.swiftpm/
+daemon/target/
+.toolchains/
+.DS_Store
+*.log
+runtime/
+state/
