@@ -9,7 +9,6 @@ let package = Package(
   ],
   products: [
     .library(name: "SharedMemoryRuntime", targets: ["SharedMemoryRuntime"]),
-    .executable(name: "shared-memory-daemon", targets: ["SharedMemoryDaemon"]),
     .executable(name: "shared-memory-benchmarks", targets: ["SharedMemoryBenchmarks"]),
   ],
   targets: [
@@ -23,10 +22,6 @@ let package = Package(
     ),
     .target(
       name: "SharedMemoryRuntime",
-      dependencies: ["SharedMemoryCore"]
-    ),
-    .executableTarget(
-      name: "SharedMemoryDaemon",
       dependencies: ["SharedMemoryCore"]
     ),
     .executableTarget(

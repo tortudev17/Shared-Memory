@@ -10,12 +10,13 @@ Application process A        Application process B
           │      one mmap region      │
           └── SPSC event ring ────────┘
                          │
-                    Swift daemon
+             Swift daemon engine
+            (first client's thread)
               allocator · files · UUIDs
               buckets · subscriptions
 ```
 
-There is no socket, pipe, FIFO, or RPC transport. The only bootstrap mechanisms are a deterministic POSIX shared-memory name, a small non-payload launch lock, and process creation. Requests, responses, events, serialized values, and all payload movement use the one mapped region.
+There is no socket, pipe, FIFO, or RPC transport. The only bootstrap mechanisms are a deterministic POSIX shared-memory name and a small non-payload launch lock. Requests, responses, events, serialized values, and all payload movement use the one mapped region.
 
 ## Region layout
 

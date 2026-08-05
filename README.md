@@ -1,6 +1,6 @@
 # SharedMemoryRuntime
 
-`SharedMemoryRuntime` is a local, daemon-backed IPC runtime for macOS and Linux. Applications import one library product and instantiate one public class, `SharedMemory`. A single Swift daemon owns one POSIX shared-memory region, the allocator, in-memory filesystem, conveyor state, UUID registry, subscriptions, and synchronization.
+`SharedMemoryRuntime` is a local, daemon-backed IPC runtime for macOS and Linux. Applications import one library product and instantiate one public class, `SharedMemory`. A daemon engine inside that library owns one POSIX shared-memory region, the allocator, in-memory filesystem, conveyor state, UUID registry, subscriptions, and synchronization.
 
 Payload bytes enter shared memory once. Filesystem reads borrow a stable snapshot while decoding, queue entries contain offsets rather than payloads, and an unchanged item passed between conveyor stages keeps the same allocation and UUID.
 
@@ -20,7 +20,7 @@ swift test
 swift run -c release shared-memory-benchmarks
 ```
 
-The tests create isolated POSIX shared-memory objects and launch the daemon executable. A restrictive container must allow `shm_open` and shared mappings.
+The tests create isolated POSIX shared-memory objects and run isolated daemon engines. A restrictive container must allow `shm_open` and shared mappings.
 
 ## Use
 
@@ -73,15 +73,9 @@ _ = decoder.notify(path: "/cache/models/current")
 _ = decoder.checkpoint(path: "/var/backups/runtime.smr")
 ```
 
-## Daemon discovery
+## Daemon startup
 
-The client checks the fixed shared-memory header and daemon PID. When no healthy daemon exists it launches `shared-memory-daemon`; a non-payload file lock makes concurrent launch attempts collapse to one process. The launcher searches:
-
-1. `SMR_DAEMON_PATH`
-2. beside the current executable and nearby SwiftPM build directories
-3. `PATH`
-
-Deploy the daemon beside the application, put it on `PATH`, or set `SMR_DAEMON_PATH` to an absolute executable path. Standard input, output, and error are connected to the null device. The runtime itself emits no logs.
+The client checks the fixed shared-memory header and daemon PID. When no healthy daemon exists, the library starts its daemon engine on a dedicated background thread in the first client process. A non-payload file lock makes concurrent launch attempts collapse to one daemon. No helper executable, environment variable, or additional package product is required.
 
 The creator's conveyor configuration is installed idempotently through shared memory. This also handles a non-creator starting an empty daemon just before the creator. A conflicting second creator is rejected rather than mutating live pipelines.
 
@@ -96,7 +90,7 @@ The creator's conveyor configuration is installed idempotently through shared me
 - `finish(uuid:)` succeeds only for the current owning stage and permanently removes the item.
 - The raw `receiveHandler` buffer is borrowed and valid only during the callback. Prefer `setReceiveHandler(for:_:)` for typed values.
 - `mlock` is attempted for the whole region. The daemon continues when host policy or `RLIMIT_MEMLOCK` denies it.
-- A daemon crash loses all runtime state by design. A newly constructed client replaces the stale region and starts a fresh daemon.
+- Exiting the process that hosts the daemon loses all runtime state by design. A newly constructed client in another process replaces the stale region and starts a fresh daemon.
 
 The default region is 256 MiB. A positive `memoryLimitGB` is honored when a creator starts a new daemon; `-1` selects the default. Non-creators ignore both conveyor and memory arguments.
 

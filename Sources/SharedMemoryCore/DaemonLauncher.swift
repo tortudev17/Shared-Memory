@@ -2,6 +2,9 @@ import CSharedMemory
 import Foundation
 
 package enum DaemonLauncher {
+  private static let embeddedQueue = DispatchQueue(
+    label: "SharedMemoryRuntime.daemon", qos: .userInteractive, attributes: .concurrent)
+
   package static func connect(
     creator: Bool,
     conveyor: [[String]]?,
@@ -17,35 +20,24 @@ package enum DaemonLauncher {
       return nil
     }
     let configuration = PipelineConfiguration(creator ? conveyor : nil)
-    guard configuration.validated() != nil,
-      let encodedPipelines = configuration.base64Encoded(),
-      let executable = daemonExecutable(environment: environment)
-    else { return nil }
+    guard configuration.validated() != nil else { return nil }
 
-    let process = Process()
-    process.executableURL = executable
-    process.arguments = [
-      "--shm-name", names.sharedMemory,
-      "--lock-file", names.lockFile,
-      "--memory-bytes", String(memoryBytes),
-      "--pipelines", encodedPipelines,
-    ]
-    process.standardInput = FileHandle.nullDevice
-    process.standardOutput = FileHandle.nullDevice
-    process.standardError = FileHandle.nullDevice
-    do {
-      try process.run()
-    } catch {
-      return nil
-    }
+    let options = DaemonOptions(
+      names: names, memoryBytes: memoryBytes, pipelines: configuration)
+    startEmbedded(options: options)
 
     let deadline = smr_monotonic_nanoseconds() &+ 5_000_000_000
     while smr_monotonic_nanoseconds() < deadline {
       if let region = openHealthy(names: names) { return region }
-      if !process.isRunning, process.terminationStatus != 0 { return nil }
       smr_sleep_nanoseconds(5_000_000)
     }
     return nil
+  }
+
+  private static func startEmbedded(options: DaemonOptions) {
+    embeddedQueue.async {
+      _ = DaemonServer.run(options: options)
+    }
   }
 
   package static func openHealthy(names: RuntimeNames) -> MappedRegion? {
@@ -60,43 +52,4 @@ package enum DaemonLauncher {
     return region
   }
 
-  private static func daemonExecutable(environment: [String: String]) -> URL? {
-    let manager = FileManager.default
-    if let configured = environment["SMR_DAEMON_PATH"], manager.isExecutableFile(atPath: configured)
-    {
-      return URL(fileURLWithPath: configured)
-    }
-
-    var candidates: [URL] = []
-    let current = URL(fileURLWithPath: ProcessInfo.processInfo.arguments.first ?? "")
-      .standardizedFileURL
-      .deletingLastPathComponent()
-    var ancestor = current
-    for _ in 0..<8 {
-      candidates.append(ancestor.appendingPathComponent("shared-memory-daemon"))
-      candidates.append(ancestor.appendingPathComponent("debug/shared-memory-daemon"))
-      ancestor.deleteLastPathComponent()
-    }
-
-    let working = URL(fileURLWithPath: manager.currentDirectoryPath)
-    candidates.append(working.appendingPathComponent(".build/debug/shared-memory-daemon"))
-    let buildDirectory = working.appendingPathComponent(".build")
-    if let children = try? manager.contentsOfDirectory(
-      at: buildDirectory,
-      includingPropertiesForKeys: nil,
-      options: [.skipsHiddenFiles]
-    ) {
-      for child in children {
-        candidates.append(child.appendingPathComponent("debug/shared-memory-daemon"))
-      }
-    }
-
-    if let path = environment["PATH"] {
-      for directory in path.split(separator: ":") {
-        candidates.append(
-          URL(fileURLWithPath: String(directory)).appendingPathComponent("shared-memory-daemon"))
-      }
-    }
-    return candidates.first { manager.isExecutableFile(atPath: $0.path) }
-  }
 }

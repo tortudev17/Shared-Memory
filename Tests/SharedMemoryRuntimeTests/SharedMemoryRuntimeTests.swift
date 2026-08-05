@@ -55,6 +55,7 @@ private final class IntegrationEnvironment: @unchecked Sendable {
     root.notificationHandler = nil
     guard let region = MappedRegion.open(name: names.sharedMemory) else { return }
     let pid = smr_daemon_pid(region.baseAddress)
+    guard pid != smr_current_pid() else { return }
     if pid > 0 { _ = kill(pid, SIGTERM) }
     let deadline = smr_monotonic_nanoseconds() + 2_000_000_000
     while smr_pid_is_alive(pid) == 1, smr_monotonic_nanoseconds() < deadline {

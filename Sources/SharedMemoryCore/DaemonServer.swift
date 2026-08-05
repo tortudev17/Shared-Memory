@@ -23,7 +23,6 @@ package enum DaemonServer {
     guard lockFD >= 0 else { return 0 }
     defer { smr_bootstrap_unlock(lockFD) }
 
-    _ = smr_detach_session()
     MappedRegion.unlink(name: options.names.sharedMemory)
     guard
       let region = MappedRegion.create(name: options.names.sharedMemory, bytes: options.memoryBytes)
@@ -38,8 +37,6 @@ package enum DaemonServer {
       return 4
     }
     _ = smr_lock_memory(region.baseAddress, region.size)
-    smr_install_termination_handlers()
-
     var lastReap = smr_monotonic_nanoseconds()
     var idleIterations = 0
     while smr_should_terminate() == 0 {
