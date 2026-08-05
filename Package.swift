@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
   name: "SharedMemoryRuntime",
   platforms: [
-    .macOS(.v13)
+    .macOS(.v12)
   ],
   products: [
     .library(name: "SharedMemoryRuntime", targets: ["SharedMemoryRuntime"]),

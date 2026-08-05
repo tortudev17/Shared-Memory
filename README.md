@@ -7,7 +7,7 @@ Payload bytes enter shared memory once. Filesystem reads borrow a stable snapsho
 ## Requirements
 
 - Swift 6.2 or newer
-- macOS 13 or newer, or a modern glibc-based Linux distribution
+- macOS 12 or newer, or a modern glibc-based Linux distribution
 - POSIX shared memory (`shm_open`, `mmap`) and process signaling
 
 The package has no third-party dependencies.
