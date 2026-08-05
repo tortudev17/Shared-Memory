@@ -134,10 +134,11 @@ final class SharedMemoryABITests: XCTestCase {
 final class BinaryFormatTests: XCTestCase {
   func testBatchFramingRoundTripsAndRejectsTruncation() throws {
     let values = [Data([1, 2, 3]), Data(), Data(repeating: 9, count: 128)]
-    let required = try XCTUnwrap(BatchLayout.requiredBytes(for: values))
+    let uuids = values.map { _ in UUID() }
+    let required = try XCTUnwrap(BatchLayout.requiredBytes(for: values, uuids: uuids))
     let memory = UnsafeMutableRawPointer.allocate(byteCount: required, alignment: 64)
     defer { memory.deallocate() }
-    XCTAssertTrue(BatchLayout.write(values, to: memory, capacity: required))
+    XCTAssertTrue(BatchLayout.write(values, uuids: uuids, to: memory, capacity: required))
     let payloads = try XCTUnwrap(
       BatchLayout.parse(
         at: UnsafeRawPointer(memory),
@@ -145,6 +146,7 @@ final class BinaryFormatTests: XCTestCase {
         absolutePayloadOffset: 1_000
       ))
     XCTAssertEqual(payloads.map(\.payloadSize), values.map { UInt64($0.count) })
+    XCTAssertEqual(payloads.compactMap(\.uuid), uuids)
     XCTAssertNil(
       BatchLayout.parse(
         at: UnsafeRawPointer(memory),

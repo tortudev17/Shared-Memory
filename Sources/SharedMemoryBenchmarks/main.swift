@@ -71,7 +71,8 @@ let source = SharedMemory(
   conveyor: [["bench-source", "bench-middle", "bench-sink"]]
 )
 let middle = SharedMemory(name: "bench-middle")
-guard source.isConnected, middle.isConnected else { exit(2) }
+let feeder = SharedMemory(name: "bench-feeder")
+guard source.isConnected, middle.isConnected, feeder.isConnected else { exit(2) }
 
 let write = measure(iterations: iterations) { index in
   source.write(path: "/bench/value", value: Sample(sequence: index, sentAt: 0, payload: payload))
@@ -96,11 +97,28 @@ middle.setReceiveHandler(for: Sample.self) { [weak middle] uuid, value in
   if count == expectedReceives { receiveDrain.signal() }
 }
 
-let pass = measure(iterations: iterations) { index in
-  source.pass([
-    Sample(sequence: index, sentAt: DispatchTime.now().uptimeNanoseconds, payload: payload)
-  ])
+let passLatencies = Locked<[UInt64]>([])
+let passCount = Locked(0)
+let passDrain = DispatchSemaphore(value: 0)
+source.setReceiveHandler(for: Sample.self) { [weak source] uuid, value in
+  let start = DispatchTime.now().uptimeNanoseconds
+  if source?.pass([(uuid, value)]) == true {
+    passLatencies.withValue { $0.append(DispatchTime.now().uptimeNanoseconds - start) }
+  }
+  let count = passCount.withValue { current -> Int in
+    current += 1
+    return current
+  }
+  if count == iterations { passDrain.signal() }
 }
+for index in 0..<iterations {
+  guard feeder.send(
+    to: "bench-source",
+    values: [Sample(sequence: index, sentAt: DispatchTime.now().uptimeNanoseconds, payload: payload)])
+  else { break }
+}
+_ = passDrain.wait(timeout: .now() + 60)
+let pass = passLatencies.snapshot()
 let send = measure(iterations: iterations) { index in
   source.send(
     to: "bench-middle",
@@ -129,10 +147,10 @@ let contentionThroughput =
 
 let zeroCopyMeasurement = Locked<(before: UInt64, after: UInt64)?>(nil)
 let zeroCopyDone = DispatchSemaphore(value: 0)
-source.setReceiveHandler(for: Sample.self) { [weak source] _, value in
+source.setReceiveHandler(for: Sample.self) { [weak source] uuid, value in
   guard let source else { return }
   let before = source.memoryUsed()
-  if source.pass([value]) {
+  if source.pass([(uuid, value)]) {
     zeroCopyMeasurement.withValue { $0 = (before, source.memoryUsed()) }
   }
 }
@@ -140,7 +158,6 @@ middle.setReceiveHandler(for: Sample.self) { [weak middle] uuid, _ in
   _ = middle?.finish(uuid: uuid)
   zeroCopyDone.signal()
 }
-let feeder = SharedMemory(name: "bench-feeder")
 _ = feeder.send(
   to: "bench-source",
   values: [

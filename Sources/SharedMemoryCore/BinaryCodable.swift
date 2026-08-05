@@ -24,17 +24,24 @@ package enum BinaryCodable {
 package struct BatchPayload: Sendable {
   package let payloadOffset: UInt64
   package let payloadSize: UInt64
+  package let uuid: UUID?
 }
 
 package enum BatchLayout {
   private static let fixedBytes = 8
   private static let lengthBytes = 8
+  private static let uuidBytes = 16
+  private static let hasUUIDsFlag: UInt32 = 1
   package static let maximumCount = 65_536
 
-  package static func requiredBytes(for values: [Data]) -> Int? {
-    guard values.count <= maximumCount else { return nil }
+  package static func requiredBytes(for values: [Data], uuids: [UUID]? = nil) -> Int? {
+    guard values.count <= maximumCount, uuids == nil || uuids?.count == values.count else {
+      return nil
+    }
     var total = fixedBytes
-    let (tableBytes, tableOverflow) = values.count.multipliedReportingOverflow(by: lengthBytes)
+    let descriptorBytes = lengthBytes + (uuids == nil ? 0 : uuidBytes)
+    let (tableBytes, tableOverflow) = values.count.multipliedReportingOverflow(
+      by: descriptorBytes)
     let (withTable, headerOverflow) = total.addingReportingOverflow(tableBytes)
     guard !tableOverflow, !headerOverflow else { return nil }
     total = withTable
@@ -47,15 +54,27 @@ package enum BatchLayout {
   }
 
   package static func write(
-    _ values: [Data], to destination: UnsafeMutableRawPointer, capacity: Int
+    _ values: [Data], uuids: [UUID]? = nil, to destination: UnsafeMutableRawPointer, capacity: Int
   ) -> Bool {
-    guard let required = requiredBytes(for: values), required <= capacity else { return false }
+    guard let required = requiredBytes(for: values, uuids: uuids), required <= capacity else {
+      return false
+    }
+    let descriptorBytes = lengthBytes + (uuids == nil ? 0 : uuidBytes)
     destination.storeBytes(of: UInt32(values.count).littleEndian, as: UInt32.self)
-    destination.advanced(by: 4).storeBytes(of: UInt32(0), as: UInt32.self)
-    var dataOffset = fixedBytes + values.count * lengthBytes
+    destination.advanced(by: 4).storeBytes(
+      of: (uuids == nil ? UInt32(0) : hasUUIDsFlag).littleEndian, as: UInt32.self)
+    var dataOffset = fixedBytes + values.count * descriptorBytes
     for (index, value) in values.enumerated() {
-      destination.advanced(by: fixedBytes + index * lengthBytes)
+      let descriptor = destination.advanced(by: fixedBytes + index * descriptorBytes)
+      descriptor
         .storeBytes(of: UInt64(value.count).littleEndian, as: UInt64.self)
+      if let uuid = uuids?[index] {
+        let bits = UUIDBits.split(uuid)
+        descriptor.advanced(by: lengthBytes).storeBytes(
+          of: bits.0.littleEndian, as: UInt64.self)
+        descriptor.advanced(by: lengthBytes + 8).storeBytes(
+          of: bits.1.littleEndian, as: UInt64.self)
+      }
       value.withUnsafeBytes { bytes in
         if let source = bytes.baseAddress, !bytes.isEmpty {
           destination.advanced(by: dataOffset).copyMemory(from: source, byteCount: bytes.count)
@@ -73,23 +92,36 @@ package enum BatchLayout {
   ) -> [BatchPayload]? {
     guard byteCount >= UInt64(fixedBytes), byteCount <= UInt64(Int.max) else { return nil }
     let count = Int(UInt32(littleEndian: source.loadUnaligned(as: UInt32.self)))
-    guard count <= maximumCount else { return nil }
-    let (tableBytes, tableOverflow) = count.multipliedReportingOverflow(by: lengthBytes)
+    let flags = UInt32(
+      littleEndian: source.advanced(by: 4).loadUnaligned(as: UInt32.self))
+    guard count <= maximumCount, flags == 0 || flags == hasUUIDsFlag else { return nil }
+    let descriptorBytes = lengthBytes + (flags == hasUUIDsFlag ? uuidBytes : 0)
+    let (tableBytes, tableOverflow) = count.multipliedReportingOverflow(by: descriptorBytes)
     let (dataStart, startOverflow) = fixedBytes.addingReportingOverflow(tableBytes)
     guard !tableOverflow, !startOverflow, dataStart <= Int(byteCount) else { return nil }
     var cursor = dataStart
     var result: [BatchPayload] = []
     result.reserveCapacity(count)
     for index in 0..<count {
-      let rawLength = source.advanced(by: fixedBytes + index * lengthBytes).loadUnaligned(
-        as: UInt64.self)
+      let descriptor = source.advanced(by: fixedBytes + index * descriptorBytes)
+      let rawLength = descriptor.loadUnaligned(as: UInt64.self)
       let length = UInt64(littleEndian: rawLength)
       guard length <= UInt64(Int.max) else { return nil }
       let (end, overflow) = cursor.addingReportingOverflow(Int(length))
       guard !overflow, end <= Int(byteCount) else { return nil }
       let (offset, offsetOverflow) = absolutePayloadOffset.addingReportingOverflow(UInt64(cursor))
       guard !offsetOverflow else { return nil }
-      result.append(BatchPayload(payloadOffset: offset, payloadSize: length))
+      let uuid: UUID?
+      if flags == hasUUIDsFlag {
+        let high = UInt64(
+          littleEndian: descriptor.advanced(by: lengthBytes).loadUnaligned(as: UInt64.self))
+        let low = UInt64(
+          littleEndian: descriptor.advanced(by: lengthBytes + 8).loadUnaligned(as: UInt64.self))
+        uuid = UUIDBits.join(high: high, low: low)
+      } else {
+        uuid = nil
+      }
+      result.append(BatchPayload(payloadOffset: offset, payloadSize: length, uuid: uuid))
       cursor = end
     }
     guard cursor == Int(byteCount) else { return nil }

@@ -84,7 +84,7 @@ Directories are implicit prefixes, so nested writes do not allocate directory no
 
 Daemon-private indexes provide fast UUID and path lookup; user payloads remain in shared memory. Every item record stores its UUID, owner/bucket, pipeline and stage indexes, payload allocation, intrusive bucket links, and last delivery generation. Intrusive links provide ordered append/removal without copying payloads.
 
-A reconnect gets a fresh generation. Existing bucket items no longer match their recorded delivery generation and are delivered again in arrival order. `finish` removes the record and owner reference. Moving an item updates its record and bucket links but never its UUID.
+A reconnect gets a fresh generation. Existing bucket items no longer match their recorded delivery generation and are delivered again in arrival order. Every `pass` value carries its delivered UUID, and the daemon validates all UUIDs, owners, and delivery generations before committing the batch. `finish` removes the record and owner reference. Moving an item updates its record and bucket links but never its UUID.
 
 ## Crash model
 

@@ -134,12 +134,12 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     source.setReceiveHandler(for: Int.self) { [weak source] uuid, value in
       ids.withValue { $0.append(uuid) }
       values.withValue { $0.append(value) }
-      successes.withValue { $0.append(source?.pass([value + 1]) == true) }
+      successes.withValue { $0.append(source?.pass([(uuid, value + 1)]) == true) }
     }
     middle.setReceiveHandler(for: Int.self) { [weak middle] uuid, value in
       ids.withValue { $0.append(uuid) }
       values.withValue { $0.append(value) }
-      successes.withValue { $0.append(middle?.pass([value + 1]) == true) }
+      successes.withValue { $0.append(middle?.pass([(uuid, value + 1)]) == true) }
     }
     sink.setReceiveHandler(for: Int.self) { [weak sink] uuid, value in
       ids.withValue { $0.append(uuid) }
@@ -153,6 +153,44 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     XCTAssertEqual(values.snapshot(), [10, 11, 12])
     XCTAssertEqual(Set(ids.snapshot()).count, 1)
     XCTAssertEqual(successes.snapshot(), [true, true, true])
+  }
+
+  func testPassRequiresTheDeliveredUUIDAndCanAdvanceOutOfOrder() {
+    let source = SharedMemory(name: "source")
+    let sink = SharedMemory(name: "middle")
+    XCTAssertTrue(source.isConnected && sink.isConnected)
+
+    let delivered = expectation(description: "source deliveries")
+    delivered.expectedFulfillmentCount = 2
+    let sourceItems = Locked<[(UUID, Int)]>([])
+    source.setReceiveHandler(for: Int.self) { uuid, value in
+      sourceItems.withValue { $0.append((uuid, value)) }
+      delivered.fulfill()
+    }
+    XCTAssertTrue(environment.root.send(to: "source", values: [1, 2]))
+    wait(for: [delivered], timeout: 5)
+
+    let items = sourceItems.snapshot()
+    guard items.count == 2 else {
+      XCTFail("expected two source deliveries")
+      return
+    }
+    XCTAssertFalse(source.pass([(UUID(), 999)]))
+
+    let advanced = expectation(description: "out-of-order advances")
+    advanced.expectedFulfillmentCount = 2
+    let sinkItems = Locked<[(UUID, Int)]>([])
+    sink.setReceiveHandler(for: Int.self) { [weak sink] uuid, value in
+      sinkItems.withValue { $0.append((uuid, value)) }
+      _ = sink?.finish(uuid: uuid)
+      advanced.fulfill()
+    }
+    XCTAssertTrue(source.pass([(items[1].0, 102), (items[0].0, 101)]))
+    wait(for: [advanced], timeout: 5)
+
+    let results = sinkItems.snapshot()
+    XCTAssertEqual(results.map(\.0), [items[1].0, items[0].0])
+    XCTAssertEqual(results.map(\.1), [102, 101])
   }
 
   func testStressReceiveCallbacksAreSerialAndInBatchOrder() {
@@ -191,10 +229,10 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     XCTAssertTrue(source.isConnected && sink.isConnected)
     let completed = expectation(description: "zero-copy pass completed")
     let measurements = Locked<(before: UInt64, after: UInt64)?>(nil)
-    source.setReceiveHandler(for: Blob.self) { [weak source] _, value in
+    source.setReceiveHandler(for: Blob.self) { [weak source] uuid, value in
       guard let source else { return }
       let before = source.memoryUsed()
-      let succeeded = source.pass([value])
+      let succeeded = source.pass([(uuid, value)])
       let after = source.memoryUsed()
       if succeeded { measurements.withValue { $0 = (before, after) } }
     }

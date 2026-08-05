@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define SMR_ABI_VERSION 1u
+#define SMR_ABI_VERSION 2u
 #define SMR_MAX_CLIENTS 64u
 #define SMR_EVENT_CAPACITY 256u
 #define SMR_MAX_NAME_BYTES 127u

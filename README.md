@@ -43,7 +43,7 @@ let classifier = SharedMemory(name: "classify")
 classifier.setReceiveHandler(for: Job.self) { [weak classifier] uuid, job in
     var classified = job
     classified.score = 0.99
-    if classifier?.pass([classified]) != true {
+    if classifier?.pass([(uuid: uuid, value: classified)]) != true {
         // The item remains in classify's bucket and can be retried.
     }
 }
@@ -54,10 +54,10 @@ persistence.setReceiveHandler(for: Job.self) { [weak persistence] uuid, job in
     _ = persistence?.finish(uuid: uuid)
 }
 
-_ = decoder.pass([Job(imageID: "42", score: 0)])
+_ = decoder.send(to: "classify", values: [Job(imageID: "42", score: 0)])
 ```
 
-The first value passed by `decode` receives a UUID and enters `classify`. At each receiving stage, `pass(_:)` matches values to that stage's oldest delivered, unfinished items. Matching items retain their UUID; surplus values become new items. `send(to:values:)` uses the same rule but bypasses conveyor order.
+The first value sent to `classify` receives a UUID. At each receiving stage, `pass(_:)` requires one delivered UUID per value and advances those exact items atomically. Each value retains its paired UUID. `send(to:values:)` introduces work directly into a known stage and may also move delivered items oldest-first.
 
 Filesystem and notifications use ordinary absolute Unix paths:
 

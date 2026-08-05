@@ -77,18 +77,17 @@ public final class SharedMemory: @unchecked Sendable {
     return result
   }
 
-  /// Advances values to the next conveyor stage as one atomic batch.
-  /// Delivered items are matched oldest-first so their UUIDs remain unchanged; surplus values
-  /// become new items with new UUIDs.
-  public func pass<T: Codable>(_ values: [T]) -> Bool {
+  /// Advances delivered items to the next conveyor stage as one atomic batch.
+  /// Every value must include the UUID of the item it replaces.
+  public func pass<T: Codable>(_ items: [(uuid: UUID, value: T)]) -> Bool {
     var encoded: [Data] = []
-    encoded.reserveCapacity(values.count)
+    encoded.reserveCapacity(items.count)
     do {
-      for value in values { encoded.append(try BinaryCodable.encode(value)) }
+      for item in items { encoded.append(try BinaryCodable.encode(item.value)) }
     } catch {
       return false
     }
-    return client?.pass(encoded: encoded) == true
+    return client?.pass(uuids: items.map(\.uuid), encoded: encoded) == true
   }
 
   /// Moves values directly to another known stage, preserving delivered UUIDs oldest-first.

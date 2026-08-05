@@ -162,13 +162,13 @@ package final class RuntimeClient: @unchecked Sendable {
     return try body(UnsafeRawBufferPointer(start: pointer, count: Int(response.value2)))
   }
 
-  package func pass(encoded values: [Data]) -> Bool {
-    transfer(encoded: values, target: nil)
+  package func pass(uuids: [UUID], encoded values: [Data]) -> Bool {
+    transfer(encoded: values, target: nil, uuids: uuids)
   }
 
   package func send(to target: String, encoded values: [Data]) -> Bool {
     guard RuntimeValidation.validTarget(target) else { return false }
-    return transfer(encoded: values, target: target)
+    return transfer(encoded: values, target: target, uuids: nil)
   }
 
   package func finish(uuid: UUID) -> Bool {
@@ -197,11 +197,11 @@ package final class RuntimeClient: @unchecked Sendable {
     return true
   }
 
-  private func transfer(encoded values: [Data], target: String?) -> Bool {
-    guard let byteCount = BatchLayout.requiredBytes(for: values),
+  private func transfer(encoded values: [Data], target: String?, uuids: [UUID]?) -> Bool {
+    guard let byteCount = BatchLayout.requiredBytes(for: values, uuids: uuids),
       let allocation = allocate(bytes: byteCount),
       let pointer = region.pointer(offset: allocation.payload, count: UInt64(byteCount)),
-      BatchLayout.write(values, to: pointer, capacity: byteCount)
+      BatchLayout.write(values, uuids: uuids, to: pointer, capacity: byteCount)
     else { return false }
     let command: RuntimeCommand = target == nil ? .pass : .send
     let response = performRequest(

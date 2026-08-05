@@ -17,7 +17,7 @@ The suite uses a uniquely named 32 MiB integration region and terminates its dae
 | Filesystem | Nested implicit directories, normalization, missing reads, invalid paths |
 | Checkpoint | Disk snapshot, archive parse, typed payload decode, checksum validation |
 | Reconnect | Unfinished item redelivery and UUID preservation after disconnect |
-| UUID tracking | Same UUID across three stages; owner finish; finished reclamation |
+| UUID tracking | UUID required per pass value, atomic out-of-order batch advancement, continuity across three stages, owner finish, finished reclamation |
 | Allocator | Split, reference counts, exhaustion, no eviction, bidirectional coalescing, corruption stop |
 | Notifications | One callback for every committed exact-path change |
 | Capacity | Oversized write returns `false` while an existing value remains readable |

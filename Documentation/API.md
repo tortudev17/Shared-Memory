@@ -34,20 +34,20 @@ Paths must be absolute UTF-8 Unix paths of at most 1,023 bytes. Repeated separat
 ## Conveyors and UUIDs
 
 ```swift
-func pass<T: Codable>(_ values: [T]) -> Bool
+func pass<T: Codable>(_ items: [(uuid: UUID, value: T)]) -> Bool
 func send<T: Codable>(to: String, values: [T]) -> Bool
 func finish(uuid: UUID) -> Bool
 ```
 
-For each call, the daemon matches values positionally to the caller's oldest delivered, unfinished bucket items:
+For `pass`, every value is paired with the UUID of an unfinished item delivered to the current connection. UUIDs must be unique within the batch, and the daemon validates the entire batch before moving anything. For `send`, values are matched positionally to the caller's oldest delivered, unfinished bucket items:
 
 - A matched value updates and moves the existing item, retaining its UUID.
 - An identical serialized value reuses the existing shared allocation.
 - A changed value replaces the payload only after its new encoding is committed.
-- A surplus value creates a new item and UUID.
+- A surplus `send` value creates a new item and UUID.
 - Unmatched existing items stay in the caller's bucket.
 
-`pass` atomically places results in the next stage. It returns `false` for a client outside a conveyor, a final stage, invalid data, or insufficient memory. `send` atomically places results in a known stage's bucket and returns `false` for an unknown target. Empty batches succeed when the route is valid and perform no mutation.
+`pass` atomically places results in the next stage. It returns `false` if any UUID is duplicated, unknown, foreign, or not yet delivered; for a client outside a conveyor; at a final stage; for invalid data; or with insufficient memory. `send` atomically places results in a known stage's bucket and returns `false` for an unknown target. Empty batches succeed when the route is valid and perform no mutation.
 
 `finish` is explicit acknowledgement and reclamation. Only the current owner can finish an item. Event and read leases may delay physical block reclamation for a few microseconds after logical finish.
 

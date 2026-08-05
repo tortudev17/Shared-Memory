@@ -417,8 +417,28 @@ package final class DaemonState {
       _ = arena.release(allocation.blockOffset)
       return true
     }
-    let advancing = deliveredItems(
-      in: connection.name, generation: connection.generation, limit: payloads.count)
+    let advancing: [UUID]
+    if directTarget == nil {
+      let uuids = payloads.compactMap(\.uuid)
+      guard uuids.count == payloads.count, Set(uuids).count == uuids.count,
+        uuids.allSatisfy({ uuid in
+          guard let item = items[uuid] else { return false }
+          return item.owner == connection.name
+            && item.deliveredGeneration == connection.generation
+        })
+      else {
+        _ = arena.release(allocation.blockOffset)
+        return false
+      }
+      advancing = uuids
+    } else {
+      guard payloads.allSatisfy({ $0.uuid == nil }) else {
+        _ = arena.release(allocation.blockOffset)
+        return false
+      }
+      advancing = deliveredItems(
+        in: connection.name, generation: connection.generation, limit: payloads.count)
+    }
     var reusesExistingPayload = [Bool](repeating: false, count: payloads.count)
     for index in 0..<min(advancing.count, payloads.count) {
       guard let item = items[advancing[index]], item.payloadSize == payloads[index].payloadSize,
