@@ -519,9 +519,9 @@ int smr_should_terminate(void) {
     return smr_termination_requested != 0;
 }
 
-uint32_t smr_crc32(const void *bytes, uint64_t count) {
+uint32_t smr_crc32_extend(uint32_t previous_crc, const void *bytes, uint64_t count) {
     const uint8_t *cursor = (const uint8_t *)bytes;
-    uint32_t crc = 0xffffffffu;
+    uint32_t crc = ~previous_crc;
     for (uint64_t index = 0; index < count; ++index) {
         crc ^= cursor[index];
         for (unsigned bit = 0; bit < 8; ++bit) {
@@ -530,6 +530,10 @@ uint32_t smr_crc32(const void *bytes, uint64_t count) {
         }
     }
     return ~crc;
+}
+
+uint32_t smr_crc32(const void *bytes, uint64_t count) {
+    return smr_crc32_extend(0u, bytes, count);
 }
 
 int32_t smr_error_code(void) {

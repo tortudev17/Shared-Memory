@@ -36,7 +36,11 @@ package enum DaemonServer {
       MappedRegion.unlink(name: options.names.sharedMemory)
       return 4
     }
-    _ = smr_lock_memory(region.baseAddress, region.size)
+    // Keep the mailbox/header control plane resident, but leave the large
+    // arena sparse and pageable. Locking an 8 GiB capacity up front forces all
+    // pages resident on macOS and can crowd a production PyTorch model into
+    // swap even when the filesystem contains only a small fraction of it.
+    _ = smr_lock_memory(region.baseAddress, smr_control_size())
     var lastReap = smr_monotonic_nanoseconds()
     var idleIterations = 0
     while smr_should_terminate() == 0 {

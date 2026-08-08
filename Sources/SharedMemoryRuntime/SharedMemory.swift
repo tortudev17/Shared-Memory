@@ -6,6 +6,41 @@ import SharedMemoryCore
 /// `SharedMemory` is the package's only public type. Each logical payload version crosses the
 /// serialization boundary once, then remains in shared memory while it moves through stages.
 public final class SharedMemory: @unchecked Sendable {
+  public struct Versioned<Value: Codable>: Codable {
+    public let value: Value
+    public let version: UInt64
+  }
+
+  public struct PathEntry: Codable, Equatable, Sendable {
+    public let path: String
+    public let version: UInt64
+  }
+
+  public struct Mutation: Sendable {
+    public enum Kind: Sendable { case write(Data), delete }
+    public let kind: Kind
+    public let path: String
+    /// `nil` is unconditional, `0` requires an absent path, and a positive
+    /// value requires the exact current file version.
+    public let expectedVersion: UInt64?
+
+    public init(kind: Kind, path: String, expectedVersion: UInt64? = nil) {
+      self.kind = kind
+      self.path = path
+      self.expectedVersion = expectedVersion
+    }
+
+    public static func write<T: Codable>(
+      path: String, value: T, expectedVersion: UInt64? = nil
+    ) -> Mutation? {
+      guard let payload = try? BinaryCodable.encode(value) else { return nil }
+      return Mutation(kind: .write(payload), path: path, expectedVersion: expectedVersion)
+    }
+
+    public static func delete(path: String, expectedVersion: UInt64? = nil) -> Mutation {
+      Mutation(kind: .delete, path: path, expectedVersion: expectedVersion)
+    }
+  }
   private let handlers: RuntimeHandlers
   private let client: RuntimeClient?
 
@@ -75,6 +110,42 @@ public final class SharedMemory: @unchecked Sendable {
         })
     else { return nil }
     return result
+  }
+
+  /// Reads one complete value together with its monotonically changing file version.
+  public func readVersioned<T: Codable>(path: String) -> Versioned<T>? {
+    client?.withVersionedRead(path: path) { bytes, version in
+      guard let value = try? BinaryCodable.decode(T.self, from: bytes) else { return nil }
+      return Versioned(value: value, version: version)
+    } ?? nil
+  }
+
+  /// Returns sorted files at `prefix`, including the exact path when present.
+  public func list(prefix: String = "/") -> [PathEntry]? {
+    client?.list(prefix: prefix)?.map { PathEntry(path: $0.path, version: $0.version) }
+  }
+
+  /// Deletes an existing file, optionally only when its version still matches.
+  public func delete(path: String, expectedVersion: UInt64? = nil) -> Bool {
+    client?.delete(path: path, expectedVersion: expectedVersion) == true
+  }
+
+  /// Atomically applies pre-encoded filesystem writes and deletes. An
+  /// `expectedVersion` of zero is a create-only precondition.
+  public func transaction(_ mutations: [Mutation]) -> Bool {
+    let encoded = mutations.map { mutation -> FilesystemMutation in
+      switch mutation.kind {
+      case .write(let payload):
+        return FilesystemMutation(
+          kind: .write, path: mutation.path,
+          expectedVersion: mutation.expectedVersion, payload: payload)
+      case .delete:
+        return FilesystemMutation(
+          kind: .delete, path: mutation.path,
+          expectedVersion: mutation.expectedVersion)
+      }
+    }
+    return client?.transaction(FilesystemTransaction(mutations: encoded)) == true
   }
 
   /// Advances delivered items to the next conveyor stage as one atomic batch.

@@ -5,11 +5,13 @@ private final class FileRecord {
   let allocationOffset: UInt64
   let payloadOffset: UInt64
   let payloadSize: UInt64
+  let version: UInt64
 
-  init(allocationOffset: UInt64, payloadOffset: UInt64, payloadSize: UInt64) {
+  init(allocationOffset: UInt64, payloadOffset: UInt64, payloadSize: UInt64, version: UInt64) {
     self.allocationOffset = allocationOffset
     self.payloadOffset = payloadOffset
     self.payloadSize = payloadSize
+    self.version = version
   }
 }
 
@@ -97,6 +99,7 @@ package final class DaemonState {
   private var connections = [ConnectionRecord?](repeating: nil, count: Int(SMR_MAX_CLIENTS))
   private var connectionsByName: [String: ConnectionRecord] = [:]
   private var knownNames = Set<String>()
+  private var nextFileVersion: UInt64 = 1
 
   package init?(region: MappedRegion, configuration: PipelineConfiguration) {
     guard let validated = configuration.validated(),
@@ -154,6 +157,7 @@ package final class DaemonState {
         response.value0 = record.allocationOffset
         response.value1 = record.payloadOffset
         response.value2 = record.payloadSize
+        response.value3 = record.version
       }
     case .pass:
       response.status =
@@ -196,6 +200,22 @@ package final class DaemonState {
       response.value0 = region.bootID
     case .configure:
       response.status = configure(connection: connection, request: request) ? 1 : 0
+    case .list:
+      guard let prefix = requestPrefix(request), let encoded = list(prefix: prefix),
+        let allocation = arena.allocate(payloadBytes: UInt64(encoded.count)),
+        let pointer = region.pointer(offset: allocation.payloadOffset, count: UInt64(encoded.count))
+      else { break }
+      encoded.copyBytes(to: pointer.assumingMemoryBound(to: UInt8.self), count: encoded.count)
+      connection.leases[allocation.blockOffset, default: 0] += 1
+      response.status = 1
+      response.value0 = allocation.blockOffset
+      response.value1 = allocation.payloadOffset
+      response.value2 = UInt64(encoded.count)
+    case .delete:
+      let expected = request.flags & 1 == 1 ? request.arg0 : nil
+      response.status = delete(request: request, expectedVersion: expected) ? 1 : 0
+    case .transaction:
+      response.status = transaction(connection: connection, request: request) ? 1 : 0
     }
     return response
   }
@@ -338,7 +358,8 @@ package final class DaemonState {
       FileRecord(
         allocationOffset: allocation.blockOffset,
         payloadOffset: allocation.payloadOffset,
-        payloadSize: request.arg1
+        payloadSize: request.arg1,
+        version: takeFileVersion()
       ),
       forKey: path
     )
@@ -349,6 +370,152 @@ package final class DaemonState {
       }
     }
     return true
+  }
+
+  private func takeFileVersion() -> UInt64 {
+    let result = nextFileVersion
+    nextFileVersion = nextFileVersion == UInt64.max ? 1 : nextFileVersion + 1
+    return result
+  }
+
+  private func list(prefix: String) -> Data? {
+    let childPrefix = prefix == "/" ? "/" : prefix + "/"
+    let entries = files.compactMap { path, record -> FilesystemPathEntry? in
+      guard prefix == "/" || path == prefix || path.hasPrefix(childPrefix) else { return nil }
+      return FilesystemPathEntry(path: path, version: record.version)
+    }.sorted { $0.path < $1.path }
+    return try? BinaryCodable.encode(entries)
+  }
+
+  private func delete(request: SMRRequest, expectedVersion: UInt64?) -> Bool {
+    guard let path = requestPath(request), let record = files[path],
+      expectedVersion == nil || expectedVersion == record.version,
+      canNotify(paths: [path])
+    else { return false }
+    files.removeValue(forKey: path)
+    _ = arena.release(record.allocationOffset)
+    enqueueNotifications(paths: [path])
+    return true
+  }
+
+  private func transaction(connection: ConnectionRecord, request: SMRRequest) -> Bool {
+    guard let staging = takeStaging(
+      connection: connection, blockOffset: request.arg0, byteCount: request.arg1),
+      request.arg1 <= UInt64(Int.max),
+      let pointer = region.pointer(offset: staging.payloadOffset, count: request.arg1)
+    else {
+      abandonStagingIfPresent(connection: connection, blockOffset: request.arg0)
+      return false
+    }
+    defer { _ = arena.release(staging.blockOffset) }
+    let bytes = UnsafeRawBufferPointer(start: pointer, count: Int(request.arg1))
+    guard let value = try? BinaryCodable.decode(FilesystemTransaction.self, from: bytes),
+      !value.mutations.isEmpty
+    else { return false }
+
+    var normalized: [(FilesystemMutation, String)] = []
+    normalized.reserveCapacity(value.mutations.count)
+    var seen = Set<String>()
+    var stagedBlocks = Set<UInt64>()
+    for mutation in value.mutations {
+      guard let path = RuntimeValidation.normalize(path: mutation.path), path != "/",
+        seen.insert(path).inserted
+      else { return false }
+      switch mutation.kind {
+      case .write:
+        let hasInline = mutation.payload != nil
+        let hasStaged = mutation.stagedBlock != nil || mutation.payloadSize != nil
+        guard hasInline != hasStaged else { return false }
+        if hasStaged {
+          guard let block = mutation.stagedBlock, let payloadSize = mutation.payloadSize,
+            stagedBlocks.insert(block).inserted,
+            connection.stagingBlocks.contains(block),
+            let allocation = arena.allocation(at: block),
+            allocation.payloadSize == payloadSize,
+            payloadSize <= allocation.capacity
+          else { return false }
+        }
+      case .delete:
+        guard mutation.payload == nil, mutation.stagedBlock == nil,
+          mutation.payloadSize == nil, files[path] != nil
+        else { return false }
+      }
+      if let expected = mutation.expectedVersion {
+        if expected == 0 {
+          guard files[path] == nil else { return false }
+        } else {
+          guard files[path]?.version == expected else { return false }
+        }
+      }
+      normalized.append((mutation, path))
+    }
+    let paths = normalized.map(\.1)
+    guard canNotify(paths: paths) else { return false }
+
+    var allocations: [String: ArenaAllocation] = [:]
+    var directAllocations = Set<UInt64>()
+    for (mutation, path) in normalized where mutation.kind == .write {
+      if let payload = mutation.payload {
+        guard let allocation = arena.allocate(payloadBytes: UInt64(payload.count)),
+          let destination = region.pointer(
+            offset: allocation.payloadOffset, count: UInt64(payload.count))
+        else {
+          for block in directAllocations { _ = arena.release(block) }
+          return false
+        }
+        payload.copyBytes(to: destination.assumingMemoryBound(to: UInt8.self), count: payload.count)
+        allocations[path] = allocation
+        directAllocations.insert(allocation.blockOffset)
+      } else if let block = mutation.stagedBlock, let allocation = arena.allocation(at: block) {
+        allocations[path] = allocation
+      }
+    }
+    // Validation above guarantees ownership and uniqueness. Transfer staged
+    // allocations out of the connection only after every possible failure.
+    for block in stagedBlocks {
+      guard connection.stagingBlocks.remove(block) != nil else {
+        for directBlock in directAllocations { _ = arena.release(directBlock) }
+        return false
+      }
+    }
+
+    var retired: [FileRecord] = []
+    for (mutation, path) in normalized {
+      if let previous = files.removeValue(forKey: path) { retired.append(previous) }
+      if mutation.kind == .write, let allocation = allocations[path] {
+        let payloadCount = mutation.payload.map { UInt64($0.count) } ?? mutation.payloadSize ?? 0
+        files[path] = FileRecord(
+          allocationOffset: allocation.blockOffset,
+          payloadOffset: allocation.payloadOffset,
+          payloadSize: payloadCount,
+          version: takeFileVersion())
+      }
+    }
+    for record in retired { _ = arena.release(record.allocationOffset) }
+    enqueueNotifications(paths: paths)
+    return true
+  }
+
+  private func canNotify(paths: [String]) -> Bool {
+    for connection in connections.compactMap({ $0 }) {
+      let additions = paths.reduce(0) { count, path in
+        count + connection.subscriptions.values.lazy.filter { $0 == path }.count
+      }
+      if connection.pendingNotificationCount > Self.maximumNotificationBacklog - additions {
+        return false
+      }
+    }
+    return true
+  }
+
+  private func enqueueNotifications(paths: [String]) {
+    for connection in connections.compactMap({ $0 }) {
+      for path in paths {
+        for (token, subscribedPath) in connection.subscriptions where subscribedPath == path {
+          connection.notifications.append(PendingNotification(subscription: token))
+        }
+      }
+    }
   }
 
   private func configure(connection: ConnectionRecord, request: SMRRequest) -> Bool {
@@ -552,16 +719,18 @@ package final class DaemonState {
   }
 
   private func checkpoint(to diskPath: String) -> Bool {
-    var entries: [CheckpointEntry] = []
+    var entries: [MappedCheckpointEntry] = []
     entries.reserveCapacity(files.count)
     for (path, record) in files {
       guard let pointer = region.pointer(offset: record.payloadOffset, count: record.payloadSize),
         record.payloadSize <= UInt64(Int.max)
       else { return false }
-      let payload = Data(bytes: pointer, count: Int(record.payloadSize))
-      entries.append(CheckpointEntry(path: path, payload: payload))
+      entries.append(
+        MappedCheckpointEntry(
+          path: path,
+          payload: UnsafeRawBufferPointer(start: pointer, count: Int(record.payloadSize))))
     }
-    return CheckpointArchive.write(entries, to: diskPath)
+    return CheckpointArchive.writeMapped(entries, to: diskPath)
   }
 
   private func installPipelines(_ value: [[String]]) {
@@ -579,6 +748,11 @@ package final class DaemonState {
   private func requestPath(_ request: SMRRequest) -> String? {
     guard let raw = rawRequestPath(request) else { return nil }
     return RuntimeValidation.normalize(path: raw).flatMap { $0 == "/" ? nil : $0 }
+  }
+
+  private func requestPrefix(_ request: SMRRequest) -> String? {
+    guard let raw = rawRequestPath(request) else { return nil }
+    return RuntimeValidation.normalize(path: raw)
   }
 
   private func rawRequestPath(_ request: SMRRequest) -> String? {

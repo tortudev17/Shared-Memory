@@ -17,6 +17,9 @@ package enum RuntimeCommand: UInt32, Sendable {
   case checkpoint = 13
   case ping = 14
   case configure = 15
+  case list = 16
+  case delete = 17
+  case transaction = 18
 }
 
 package enum RuntimeEventKind: UInt64, Sendable {

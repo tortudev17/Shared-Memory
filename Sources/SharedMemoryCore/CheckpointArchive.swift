@@ -1,5 +1,10 @@
 import CSharedMemory
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#else
+import Glibc
+#endif
 
 package struct CheckpointEntry: Equatable, Sendable {
   package let path: String
@@ -11,9 +16,26 @@ package struct CheckpointEntry: Equatable, Sendable {
   }
 }
 
+/// A borrowed filesystem value that remains owned by the shared arena for the
+/// duration of a synchronous checkpoint request.
+package struct MappedCheckpointEntry {
+  package let path: String
+  package let payload: UnsafeRawBufferPointer
+
+  package init(path: String, payload: UnsafeRawBufferPointer) {
+    self.path = path
+    self.payload = payload
+  }
+}
+
 package enum CheckpointArchive {
   private static let magic = Data([0x53, 0x4d, 0x52, 0x43, 0x4b, 0x50, 0x31, 0x00])
   private static let version: UInt32 = 1
+  // FileHandle cannot reliably bridge a single multi-gigabyte Data value on
+  // every supported Foundation version. Bounded no-copy views preserve the
+  // exact archive bytes while keeping each write comfortably below that API
+  // boundary.
+  private static let mappedWriteChunkBytes = 8 * 1024 * 1024
 
   package static func encode(_ entries: [CheckpointEntry]) -> Data? {
     guard entries.count <= Int(UInt32.max) else { return nil }
@@ -89,6 +111,104 @@ package enum CheckpointArchive {
     }
   }
 
+  /// Writes the same archive format as `encode`, but streams borrowed arena
+  /// payloads directly to a same-directory temporary file. This keeps a model
+  /// checkpoint atomic without materializing a second multi-gigabyte archive.
+  package static func writeMapped(_ entries: [MappedCheckpointEntry], to path: String) -> Bool {
+    guard entries.count <= Int(UInt32.max) else { return false }
+    let destination = URL(fileURLWithPath: path)
+    let parent = destination.deletingLastPathComponent()
+    let temporary = parent.appendingPathComponent(
+      ".\(destination.lastPathComponent).\(UUID().uuidString).tmp")
+    let manager = FileManager.default
+    var handle: FileHandle?
+    do {
+      try manager.createDirectory(at: parent, withIntermediateDirectories: true)
+      guard manager.createFile(atPath: temporary.path, contents: nil) else { return false }
+      let opened = try FileHandle(forWritingTo: temporary)
+      handle = opened
+      var archiveCRC: UInt32 = 0
+
+      func emit(_ data: Data, includeInCRC: Bool = true) throws {
+        try opened.write(contentsOf: data)
+        if includeInCRC {
+          archiveCRC = data.withUnsafeBytes { bytes in
+            smr_crc32_extend(archiveCRC, bytes.baseAddress, UInt64(bytes.count))
+          }
+        }
+      }
+
+      var header = Data()
+      header.append(magic)
+      append(version, to: &header)
+      append(UInt32(entries.count), to: &header)
+      try emit(header)
+
+      for entry in entries.sorted(by: { $0.path < $1.path }) {
+        let pathData = Data(entry.path.utf8)
+        guard pathData.count <= Int(UInt32.max) else { throw CheckpointWriteError.invalidEntry }
+        var payloadCRC: UInt32 = 0
+        if let baseAddress = entry.payload.baseAddress {
+          var cursor = 0
+          while cursor < entry.payload.count {
+            let count = min(mappedWriteChunkBytes, entry.payload.count - cursor)
+            payloadCRC = smr_crc32_extend(
+              payloadCRC, baseAddress.advanced(by: cursor), UInt64(count))
+            cursor += count
+          }
+        } else if entry.payload.count != 0 {
+          throw CheckpointWriteError.invalidEntry
+        }
+        var entryHeader = Data()
+        append(UInt32(pathData.count), to: &entryHeader)
+        append(UInt32(0), to: &entryHeader)
+        append(UInt64(entry.payload.count), to: &entryHeader)
+        append(payloadCRC, to: &entryHeader)
+        append(UInt32(0), to: &entryHeader)
+        try emit(entryHeader)
+        try emit(pathData)
+        if entry.payload.count > 0 {
+          guard let baseAddress = entry.payload.baseAddress else {
+            throw CheckpointWriteError.invalidEntry
+          }
+          var cursor = 0
+          while cursor < entry.payload.count {
+            let count = min(mappedWriteChunkBytes, entry.payload.count - cursor)
+            let chunkAddress = baseAddress.advanced(by: cursor)
+            let borrowed = Data(
+              bytesNoCopy: UnsafeMutableRawPointer(mutating: chunkAddress),
+              count: count,
+              deallocator: .none)
+            try opened.write(contentsOf: borrowed)
+            archiveCRC = smr_crc32_extend(archiveCRC, chunkAddress, UInt64(count))
+            cursor += count
+          }
+        }
+      }
+      var footer = Data()
+      append(archiveCRC, to: &footer)
+      try emit(footer, includeInCRC: false)
+      try opened.synchronize()
+      try opened.close()
+      handle = nil
+
+      let renamed = temporary.path.withCString { source in
+        destination.path.withCString { target in rename(source, target) }
+      }
+      guard renamed == 0 else { throw CheckpointWriteError.renameFailed }
+      return true
+    } catch {
+      try? handle?.close()
+      try? manager.removeItem(at: temporary)
+      return false
+    }
+  }
+
+  private enum CheckpointWriteError: Error {
+    case invalidEntry
+    case renameFailed
+  }
+
   private static func append<T: FixedWidthInteger>(_ value: T, to data: inout Data) {
     var littleEndian = value.littleEndian
     withUnsafeBytes(of: &littleEndian) { data.append(contentsOf: $0) }
@@ -108,6 +228,15 @@ package enum CheckpointArchive {
   private static func crc32<D: DataProtocol>(_ data: D) -> UInt32 {
     let contiguous = Data(data)
     return contiguous.withUnsafeBytes { bytes in
+      smr_crc32(bytes.baseAddress, UInt64(bytes.count))
+    }
+  }
+
+  // Prefer this overload for the very large Data values produced by model
+  // checkpoints. The generic DataProtocol form must make a contiguous copy;
+  // Data is already contiguous and can be checksummed in place.
+  private static func crc32(_ data: Data) -> UInt32 {
+    data.withUnsafeBytes { bytes in
       smr_crc32(bytes.baseAddress, UInt64(bytes.count))
     }
   }

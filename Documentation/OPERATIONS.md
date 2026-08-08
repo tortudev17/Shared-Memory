@@ -8,7 +8,12 @@ Applications only need to link the `SharedMemoryRuntime` library product. The li
 swift build -c release
 ```
 
-There is no helper executable to install. The daemon engine lives until its host application exits. If other clients require the shared state, keep the first host application running.
+The library can still host the daemon engine in its first client process. For
+filesystem-only deployments that must outlive an application client, build and
+run the `shared-memory-host` product. It supplies no conveyor configuration,
+defaults to 8 GiB, accepts `--memory-limit-gb`, and accepts `--memory-bytes` for
+small isolated tests. Keep whichever host owns the daemon running while other
+clients require the shared state.
 
 ## Startup order
 
@@ -20,9 +25,9 @@ The shared-memory object is mode `0600`. This gives one host daemon with same-us
 
 ## Memory sizing and locking
 
-The default size is 256 MiB. A creator may request positive whole GiB with `memoryLimitGB`. The mapping is sparse until pages are touched, but `mlock` can make the configured capacity count against resident-memory and locked-memory limits.
+The default size is 256 MiB. A creator may request positive whole GiB with `memoryLimitGB`. The payload arena remains sparse and pageable; only the fixed control plane is passed to `mlock`, so unused configured capacity does not count as resident memory.
 
-For deterministic locking on Linux, raise `LimitMEMLOCK` in systemd or the process's `RLIMIT_MEMLOCK`. On macOS, configure the launch service and host policy accordingly. Failure to lock is non-fatal because many desktop environments set a small default limit.
+For deterministic control-plane locking on Linux, raise `LimitMEMLOCK` in systemd or the process's `RLIMIT_MEMLOCK`. On macOS, configure the launch service and host policy accordingly. Failure to lock is non-fatal because many desktop environments set a small default limit.
 
 Sizing should include:
 

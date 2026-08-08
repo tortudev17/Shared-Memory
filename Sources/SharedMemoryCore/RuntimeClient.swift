@@ -162,6 +162,52 @@ package final class RuntimeClient: @unchecked Sendable {
     return try body(UnsafeRawBufferPointer(start: pointer, count: Int(response.value2)))
   }
 
+  package func withVersionedRead<R>(
+    path: String, _ body: (UnsafeRawBufferPointer, UInt64) throws -> R
+  ) rethrows -> R? {
+    guard let normalized = RuntimeValidation.normalize(path: path), normalized != "/",
+      let response = performRequest(command: .read, path: normalized), response.succeeded,
+      response.value2 <= UInt64(Int.max),
+      let pointer = region.pointer(offset: response.value1, count: response.value2)
+    else { return nil }
+    defer { _ = performRequest(command: .releaseLease, arg0: response.value0) }
+    return try body(
+      UnsafeRawBufferPointer(start: pointer, count: Int(response.value2)), response.value3)
+  }
+
+  package func list(prefix: String) -> [FilesystemPathEntry]? {
+    guard let normalized = RuntimeValidation.normalize(path: prefix),
+      let response = performRequest(command: .list, path: normalized), response.succeeded,
+      response.value2 <= UInt64(Int.max),
+      let pointer = region.pointer(offset: response.value1, count: response.value2)
+    else { return nil }
+    defer { _ = performRequest(command: .releaseLease, arg0: response.value0) }
+    let bytes = UnsafeRawBufferPointer(start: pointer, count: Int(response.value2))
+    return try? BinaryCodable.decode([FilesystemPathEntry].self, from: bytes)
+  }
+
+  package func delete(path: String, expectedVersion: UInt64?) -> Bool {
+    guard let normalized = RuntimeValidation.normalize(path: path), normalized != "/" else {
+      return false
+    }
+    return performRequest(
+      command: .delete,
+      flags: expectedVersion == nil ? 0 : 1,
+      arg0: expectedVersion ?? 0,
+      path: normalized
+    )?.succeeded == true
+  }
+
+  package func transaction(_ value: FilesystemTransaction) -> Bool {
+    guard let data = try? BinaryCodable.encode(value), let staged = stage(data: data) else {
+      return false
+    }
+    let response = performRequest(
+      command: .transaction, arg0: staged.block, arg1: UInt64(data.count))
+    if response?.succeeded != true { _ = performRequest(command: .abandon, arg0: staged.block) }
+    return response?.succeeded == true
+  }
+
   package func pass(uuids: [UUID], encoded values: [Data]) -> Bool {
     transfer(encoded: values, target: nil, uuids: uuids)
   }
