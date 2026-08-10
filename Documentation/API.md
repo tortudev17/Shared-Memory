@@ -39,7 +39,7 @@ func send<T: Codable>(to: String, values: [T]) -> Bool
 func finish(uuid: UUID) -> Bool
 ```
 
-For `pass`, every value is paired with the UUID of an unfinished item delivered to the current connection. UUIDs must be unique within the batch, and the daemon validates the entire batch before moving anything. For `send`, values are matched positionally to the caller's oldest delivered, unfinished bucket items:
+For `pass`, every value is paired with a UUID. A first-stage client may use an unused UUID to create an item directly in the next stage; otherwise the UUID must identify an unfinished item delivered to the current connection. UUIDs must be unique within the batch, and the daemon validates the entire batch before moving anything. For `send`, values are matched positionally to the caller's oldest delivered, unfinished bucket items:
 
 - A matched value updates and moves the existing item, retaining its UUID.
 - An identical serialized value reuses the existing shared allocation.
@@ -47,7 +47,7 @@ For `pass`, every value is paired with the UUID of an unfinished item delivered 
 - A surplus `send` value creates a new item and UUID.
 - Unmatched existing items stay in the caller's bucket.
 
-`pass` atomically places results in the next stage. It returns `false` if any UUID is duplicated, unknown, foreign, or not yet delivered; for a client outside a conveyor; at a final stage; for invalid data; or with insufficient memory. `send` atomically places results in a known stage's bucket and returns `false` for an unknown target. Empty batches succeed when the route is valid and perform no mutation.
+`pass` atomically places results in the next stage. It returns `false` if any UUID is duplicated, foreign, or not yet delivered (except unused UUIDs introduced by the first stage); for a client outside a conveyor; at a final stage; for invalid data; or with insufficient memory. `send` atomically places results in a known stage's bucket and returns `false` for an unknown target. Empty batches succeed when the route is valid and perform no mutation.
 
 `finish` is explicit acknowledgement and reclamation. Only the current owner can finish an item. Event and read leases may delay physical block reclamation for a few microseconds after logical finish.
 

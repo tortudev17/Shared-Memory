@@ -176,22 +176,27 @@ final class SharedMemoryRuntimeTests: XCTestCase {
       XCTFail("expected two source deliveries")
       return
     }
-    XCTAssertFalse(source.pass([(UUID(), 999)]))
-
     let advanced = expectation(description: "out-of-order advances")
-    advanced.expectedFulfillmentCount = 2
+    advanced.expectedFulfillmentCount = 3
     let sinkItems = Locked<[(UUID, Int)]>([])
     sink.setReceiveHandler(for: Int.self) { [weak sink] uuid, value in
       sinkItems.withValue { $0.append((uuid, value)) }
       _ = sink?.finish(uuid: uuid)
       advanced.fulfill()
     }
+
+    // First-stage clients may inject new work directly with pass.
+    let injected = UUID()
+    XCTAssertTrue(source.pass([(injected, 999)]))
     XCTAssertTrue(source.pass([(items[1].0, 102), (items[0].0, 101)]))
     wait(for: [advanced], timeout: 5)
 
     let results = sinkItems.snapshot()
-    XCTAssertEqual(results.map(\.0), [items[1].0, items[0].0])
-    XCTAssertEqual(results.map(\.1), [102, 101])
+    XCTAssertEqual(results.map(\.0), [injected, items[1].0, items[0].0])
+    XCTAssertEqual(results.map(\.1), [999, 102, 101])
+
+    // A non-first stage cannot invent a UUID.
+    XCTAssertFalse(sink.pass([(UUID(), 999)]))
   }
 
   func testStressReceiveCallbacksAreSerialAndInBatchOrder() {

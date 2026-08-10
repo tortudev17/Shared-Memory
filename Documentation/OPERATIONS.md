@@ -12,7 +12,7 @@ There is no helper executable to install. The daemon engine lives until its host
 
 ## Startup order
 
-Start the creator first when practical. If a non-creator wins the launch race, it starts an empty default-size daemon; the later creator installs its conveyors through an idempotent shared-memory command. Once live items exist, a conflicting configuration is rejected.
+Start the creator first when practical. A creator replaces a healthy daemon from another process using the same runtime instance, so its memory limit and conveyors become authoritative; all volatile contents of the replaced daemon are lost. An embedded daemon has the same PID as its creator, so a second creator in that same process reuses it rather than terminating the application. If a non-creator wins the launch race, it starts an empty default-size daemon; a later creator replaces that external daemon.
 
 The default production namespace is one daemon per host. `SMR_INSTANCE_ID` exists for isolated tests and benchmarks; do not set it in production unless multiple deliberately isolated runtimes are desired.
 

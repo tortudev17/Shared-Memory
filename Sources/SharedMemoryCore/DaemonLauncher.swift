@@ -1,6 +1,12 @@
 import CSharedMemory
 import Foundation
 
+#if canImport(Darwin)
+  import Darwin
+#else
+  import Glibc
+#endif
+
 package enum DaemonLauncher {
   private static let embeddedQueue = DispatchQueue(
     label: "SharedMemoryRuntime.daemon", qos: .userInteractive, attributes: .concurrent)
@@ -12,6 +18,7 @@ package enum DaemonLauncher {
     environment: [String: String] = ProcessInfo.processInfo.environment
   ) -> MappedRegion? {
     let names = RuntimeNames(environment: environment)
+    if creator, !replaceExistingDaemon(names: names) { return nil }
     if let existing = openHealthy(names: names) { return existing }
     guard
       let memoryBytes = RuntimeValidation.memoryBytes(
@@ -38,6 +45,23 @@ package enum DaemonLauncher {
     embeddedQueue.async {
       _ = DaemonServer.run(options: options)
     }
+  }
+
+  /// A creator owns the lifetime of its named runtime. Replacing an external daemon
+  /// discards its volatile data and lets the new creator start with its own settings.
+  /// An embedded daemon shares the caller's PID, so signalling it would terminate the
+  /// application itself; that case intentionally reuses the existing daemon.
+  private static func replaceExistingDaemon(names: RuntimeNames) -> Bool {
+    guard let region = openHealthy(names: names) else { return true }
+    let pid = smr_daemon_pid(region.baseAddress)
+    guard pid != smr_current_pid() else { return true }
+    guard kill(pid, SIGTERM) == 0 else { return false }
+
+    let deadline = smr_monotonic_nanoseconds() &+ 2_000_000_000
+    while smr_pid_is_alive(pid) == 1 && smr_monotonic_nanoseconds() < deadline {
+      smr_sleep_nanoseconds(5_000_000)
+    }
+    return smr_pid_is_alive(pid) == 0
   }
 
   package static func openHealthy(names: RuntimeNames) -> MappedRegion? {

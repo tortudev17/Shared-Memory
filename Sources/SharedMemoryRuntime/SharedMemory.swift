@@ -77,8 +77,9 @@ public final class SharedMemory: @unchecked Sendable {
     return result
   }
 
-  /// Advances delivered items to the next conveyor stage as one atomic batch.
-  /// Every value must include the UUID of the item it replaces.
+  /// Advances items to the next conveyor stage as one atomic batch.
+  /// A first-stage client may introduce a new item by supplying an unused UUID;
+  /// later stages must supply UUIDs of items delivered to that client.
   public func pass<T: Codable>(_ items: [(uuid: UUID, value: T)]) -> Bool {
     var encoded: [Data] = []
     encoded.reserveCapacity(items.count)

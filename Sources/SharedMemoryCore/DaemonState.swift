@@ -379,6 +379,7 @@ package final class DaemonState {
   {
     let destination: String
     let position: (pipeline: Int, stage: Int)
+    let mayIntroduceWithPass: Bool
     if let directTarget {
       guard RuntimeValidation.validTarget(directTarget), knownNames.contains(directTarget) else {
         abandonStagingIfPresent(connection: connection, blockOffset: request.arg0)
@@ -386,6 +387,7 @@ package final class DaemonState {
       }
       destination = directTarget
       position = stagePositions[destination] ?? (pipeline: -1, stage: -1)
+      mayIntroduceWithPass = false
     } else {
       guard let current = stagePositions[connection.name],
         current.stage + 1 < pipelines[current.pipeline].count
@@ -395,6 +397,7 @@ package final class DaemonState {
       }
       destination = pipelines[current.pipeline][current.stage + 1]
       position = (current.pipeline, current.stage + 1)
+      mayIntroduceWithPass = current.stage == 0
     }
     guard
       let allocation = takeStaging(
@@ -422,9 +425,13 @@ package final class DaemonState {
       let uuids = payloads.compactMap(\.uuid)
       guard uuids.count == payloads.count, Set(uuids).count == uuids.count,
         uuids.allSatisfy({ uuid in
-          guard let item = items[uuid] else { return false }
-          return item.owner == connection.name
-            && item.deliveredGeneration == connection.generation
+          if let item = items[uuid] {
+            return item.owner == connection.name
+              && item.deliveredGeneration == connection.generation
+          }
+          // The first stage may introduce work directly with pass. Later stages must
+          // still pass only items that were delivered to them.
+          return mayIntroduceWithPass
         })
       else {
         _ = arena.release(allocation.blockOffset)
@@ -472,8 +479,9 @@ package final class DaemonState {
         items[item.uuid] = item
         append(item, to: destination)
       } else {
-        var uuid = UUID()
-        while items[uuid] != nil { uuid = UUID() }
+        // A pass from the first stage supplies the UUID for newly introduced work.
+        // send creates UUIDs itself because its payloads intentionally have no UUID.
+        let uuid = directTarget == nil ? advancing[index] : UUID()
         let item = ItemRecord(
           uuid: uuid,
           owner: destination,
