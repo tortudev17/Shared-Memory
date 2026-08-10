@@ -64,6 +64,18 @@ Filesystem and notifications use ordinary absolute Unix paths:
 ```swift
 _ = decoder.write(path: "/cache/models/current", value: modelMetadata)
 let metadata: ModelMetadata? = decoder.read(path: "/cache/models/current")
+let versioned: SharedMemory.Versioned<ModelMetadata>? =
+    decoder.readVersioned(path: "/cache/models/current")
+let files = decoder.list(prefix: "/cache/models")
+
+if let versioned,
+   let replacement = SharedMemory.Mutation.write(
+       path: "/cache/models/current",
+       value: nextModelMetadata,
+       expectedVersion: versioned.version) {
+    _ = decoder.transaction([replacement])
+}
+_ = decoder.delete(path: "/cache/models/obsolete", expectedVersion: oldVersion)
 
 decoder.notificationHandler = { path in
     // Runs serially on the client's receive executor.
@@ -79,17 +91,30 @@ The client checks the fixed shared-memory header and daemon PID. When no healthy
 
 The creator's conveyor configuration is installed idempotently through shared memory. This also handles a non-creator starting an empty daemon just before the creator. A conflicting second creator is rejected rather than mutating live pipelines.
 
+For services that need a persistent filesystem without a conveyor, the package
+also builds `shared-memory-host`. It starts with no conveyor configuration and
+defaults to an 8 GiB region:
+
+```sh
+swift run -c release shared-memory-host
+# Isolated tests may use: --memory-bytes 67108864
+```
+
+`shared-memory-tool` is a small filesystem interop executable used by the
+cross-language test suite.
+
 ## Semantics worth knowing
 
 - All API calls are thread-safe and linearized by the daemon.
 - A read sees either the complete old value or the complete new value, never a partial encoding.
+- Versions change monotonically with committed writes. Prefix listings are sorted, and conditional deletes/transactions fail without partial mutation. Transaction expected version zero means the path must be absent.
 - Missing files return `nil`. Parent directories are implicit.
 - Capacity exhaustion returns `false`; data is never evicted.
 - Receive callbacks are strictly serial and preserve bucket arrival order.
 - Buckets and unfinished UUIDs survive client disconnects. Reconnection redelivers unfinished items.
 - `finish(uuid:)` succeeds only for the current owning stage and permanently removes the item.
 - The raw `receiveHandler` buffer is borrowed and valid only during the callback. Prefer `setReceiveHandler(for:_:)` for typed values.
-- `mlock` is attempted for the whole region. The daemon continues when host policy or `RLIMIT_MEMLOCK` denies it.
+- `mlock` is attempted only for the fixed control plane. The payload arena stays sparse and pageable, so configured capacity is not forced resident.
 - Exiting the process that hosts the daemon loses all runtime state by design. A newly constructed client in another process replaces the stale region and starts a fresh daemon.
 
 The default region is 256 MiB. A positive `memoryLimitGB` is honored when a creator starts a new daemon; `-1` selects the default. Non-creators ignore both conveyor and memory arguments.

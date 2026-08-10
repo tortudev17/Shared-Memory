@@ -22,6 +22,10 @@ A creator may install zero to three conveyors. Every conveyor is a non-empty ord
 ```swift
 func write<T: Codable>(path: String, value: T) -> Bool
 func read<T: Codable>(path: String) -> T?
+func readVersioned<T: Codable>(path: String) -> Versioned<T>?
+func list(prefix: String = "/") -> [PathEntry]?
+func delete(path: String, expectedVersion: UInt64? = nil) -> Bool
+func transaction(_ mutations: [Mutation]) -> Bool
 func checkpoint(path: String) -> Bool
 ```
 
@@ -29,7 +33,20 @@ Paths must be absolute UTF-8 Unix paths of at most 1,023 bytes. Repeated separat
 
 `write` is copy-on-commit: serialization and staging complete before the daemon replaces the file record. An old payload remains valid while any read lease exists. Missing parent directories are implicit. `read` returns `nil` for a missing path, invalid path, daemon failure, type mismatch, or corrupt encoding.
 
+`readVersioned` returns the same complete snapshot with its file version.
+`list` returns exact/prefix descendants sorted by normalized path. Conditional
+deletes and mutations compare their expected versions before changing
+anything. For transaction mutations, `nil` is unconditional, zero requires an
+absent path, and a positive expected version requires an exact match.
+`transaction` validates every mutation and capacity requirement,
+then publishes all writes and deletes as one daemon operation. Large native
+clients may transfer separately staged allocations at commit, avoiding a
+second payload-sized transaction copy.
+
 `checkpoint` writes a sorted, versioned binary archive with per-value and whole-archive CRC-32 checksums. It creates missing disk parent directories and uses an atomic file replacement. Checkpointing is synchronous and temporarily pauses other daemon commands; it is the only operation designed to copy every filesystem payload out of shared memory.
+The daemon streams borrowed arena payloads to the archive and computes CRCs
+incrementally, so checkpointing does not allocate another archive-sized memory
+buffer.
 
 ## Conveyors and UUIDs
 

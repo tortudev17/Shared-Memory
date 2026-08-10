@@ -105,6 +105,53 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     XCTAssertFalse(environment.root.write(path: "relative", value: expected))
   }
 
+  func testVersionedListDeleteAndConditionalTransaction() throws {
+    let prefix = "/extended/\(UUID().uuidString)"
+    let first = prefix + "/first"
+    let second = prefix + "/second"
+    XCTAssertTrue(environment.root.write(path: first, value: 10))
+
+    let initial: SharedMemory.Versioned<Int> = try XCTUnwrap(
+      environment.root.readVersioned(path: first))
+    XCTAssertEqual(initial.value, 10)
+    XCTAssertGreaterThan(initial.version, 0)
+    XCTAssertEqual(environment.root.list(prefix: prefix)?.map(\.path), [first])
+
+    let write = try XCTUnwrap(
+      SharedMemory.Mutation.write(path: first, value: 11, expectedVersion: initial.version))
+    let create = try XCTUnwrap(
+      SharedMemory.Mutation.write(path: second, value: "created", expectedVersion: 0))
+    XCTAssertTrue(environment.root.transaction([write, create]))
+
+    let createAgain = try XCTUnwrap(
+      SharedMemory.Mutation.write(path: second, value: "must-not-replace", expectedVersion: 0))
+    XCTAssertFalse(environment.root.transaction([createAgain]))
+    let unchanged: String? = environment.root.read(path: second)
+    XCTAssertEqual(unchanged, "created")
+
+    let changed: SharedMemory.Versioned<Int> = try XCTUnwrap(
+      environment.root.readVersioned(path: first))
+    XCTAssertEqual(changed.value, 11)
+    XCTAssertNotEqual(changed.version, initial.version)
+    XCTAssertEqual(environment.root.list(prefix: prefix)?.map(\.path), [first, second])
+
+    let stale = try XCTUnwrap(
+      SharedMemory.Mutation.write(path: first, value: 12, expectedVersion: initial.version))
+    XCTAssertFalse(environment.root.transaction([stale]))
+    XCTAssertFalse(environment.root.delete(path: first, expectedVersion: initial.version))
+    XCTAssertTrue(environment.root.delete(path: first, expectedVersion: changed.version))
+    let missing: Int? = environment.root.read(path: first)
+    XCTAssertNil(missing)
+
+    let secondVersion = try XCTUnwrap(
+      (environment.root.readVersioned(path: second) as SharedMemory.Versioned<String>?)?.version)
+    XCTAssertTrue(
+      environment.root.transaction([
+        SharedMemory.Mutation.delete(path: second, expectedVersion: secondVersion)
+      ]))
+    XCTAssertEqual(environment.root.list(prefix: prefix), [])
+  }
+
   func testNotificationsAreDeliveredForEveryCommittedChange() {
     let path = "/notifications/\(UUID().uuidString)"
     let expectation = expectation(description: "three notifications")

@@ -10,6 +10,8 @@ let package = Package(
   products: [
     .library(name: "SharedMemoryRuntime", targets: ["SharedMemoryRuntime"]),
     .executable(name: "shared-memory-benchmarks", targets: ["SharedMemoryBenchmarks"]),
+    .executable(name: "shared-memory-host", targets: ["SharedMemoryHost"]),
+    .executable(name: "shared-memory-tool", targets: ["SharedMemoryTool"]),
   ],
   targets: [
     .target(
@@ -27,6 +29,14 @@ let package = Package(
     .executableTarget(
       name: "SharedMemoryBenchmarks",
       dependencies: ["SharedMemoryRuntime", "SharedMemoryCore", "CSharedMemory"]
+    ),
+    .executableTarget(
+      name: "SharedMemoryHost",
+      dependencies: ["SharedMemoryRuntime"]
+    ),
+    .executableTarget(
+      name: "SharedMemoryTool",
+      dependencies: ["SharedMemoryRuntime"]
     ),
     .testTarget(
       name: "SharedMemoryCoreTests",

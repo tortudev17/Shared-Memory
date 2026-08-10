@@ -156,12 +156,31 @@ final class BinaryFormatTests: XCTestCase {
   }
 
   func testCheckpointRoundTripAndChecksumCorruption() throws {
+    let firstPayload = Data([1, 2, 3])
+    let secondPayload = Data(repeating: 4, count: 100)
     let entries = [
-      CheckpointEntry(path: "/a", payload: Data([1, 2, 3])),
-      CheckpointEntry(path: "/nested/b", payload: Data(repeating: 4, count: 100)),
+      CheckpointEntry(path: "/a", payload: firstPayload),
+      CheckpointEntry(path: "/nested/b", payload: secondPayload),
     ]
     let archive = try XCTUnwrap(CheckpointArchive.encode(entries))
     XCTAssertEqual(CheckpointArchive.decode(archive), entries)
+
+    let streamedURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "smr-checkpoint-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: streamedURL) }
+    firstPayload.withUnsafeBytes { first in
+      secondPayload.withUnsafeBytes { second in
+        XCTAssertTrue(
+          CheckpointArchive.writeMapped(
+            [
+              MappedCheckpointEntry(path: "/nested/b", payload: second),
+              MappedCheckpointEntry(path: "/a", payload: first),
+            ],
+            to: streamedURL.path))
+      }
+    }
+    XCTAssertEqual(try Data(contentsOf: streamedURL), archive)
+
     var corrupted = archive
     corrupted[corrupted.count / 2] ^= 1
     XCTAssertNil(CheckpointArchive.decode(corrupted))

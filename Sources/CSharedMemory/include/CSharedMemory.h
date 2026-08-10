@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define SMR_ABI_VERSION 2u
+#define SMR_ABI_VERSION 3u
 #define SMR_MAX_CLIENTS 64u
 #define SMR_EVENT_CAPACITY 256u
 #define SMR_MAX_NAME_BYTES 127u
@@ -144,6 +144,7 @@ void smr_install_termination_handlers(void);
 int smr_should_terminate(void);
 
 uint32_t smr_crc32(const void *bytes, uint64_t count);
+uint32_t smr_crc32_extend(uint32_t previous_crc, const void *bytes, uint64_t count);
 int32_t smr_error_code(void);
 int smr_bytes_equal(const void *left, const void *right, uint64_t count);
 uint64_t smr_peak_resident_bytes(void);
