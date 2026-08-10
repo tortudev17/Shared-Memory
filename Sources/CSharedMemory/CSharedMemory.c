@@ -14,6 +14,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#endif
+
 #define SMR_MAGIC "SMRIPC1"
 #define SMR_PAGE_ALIGNMENT 4096u
 
@@ -181,6 +185,100 @@ int smr_lock_memory(void *address, uint64_t size) {
         return -1;
     }
     return mlock(address, (size_t)size);
+}
+
+int smr_discard_memory(void *address, uint64_t size) {
+    if (address == NULL || size == 0 || size > SIZE_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    long raw_page_size = sysconf(_SC_PAGESIZE);
+    if (raw_page_size <= 0) return -1;
+    uintptr_t page_size = (uintptr_t)raw_page_size;
+    uintptr_t raw_start = (uintptr_t)address;
+    if (raw_start > UINTPTR_MAX - (uintptr_t)size) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    uintptr_t raw_end = raw_start + (uintptr_t)size;
+    uintptr_t start = raw_start;
+    uintptr_t remainder = raw_start % page_size;
+    if (remainder != 0) {
+        uintptr_t adjustment = page_size - remainder;
+        if (adjustment > raw_end - raw_start) return 0;
+        start += adjustment;
+    }
+    uintptr_t end = raw_end / page_size * page_size;
+    if (start >= end) return 0;
+#if defined(__APPLE__)
+    if (madvise((void *)start, (size_t)(end - start), MADV_FREE_REUSABLE) == 0) return 0;
+    return madvise((void *)start, (size_t)(end - start), MADV_FREE);
+#elif defined(MADV_REMOVE)
+    if (madvise((void *)start, (size_t)(end - start), MADV_REMOVE) == 0) return 0;
+    return madvise((void *)start, (size_t)(end - start), MADV_DONTNEED);
+#else
+    return madvise((void *)start, (size_t)(end - start), MADV_DONTNEED);
+#endif
+}
+
+int smr_reuse_memory(void *address, uint64_t size) {
+#if defined(__APPLE__)
+    if (address == NULL || size == 0 || size > SIZE_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    long raw_page_size = sysconf(_SC_PAGESIZE);
+    if (raw_page_size <= 0) return -1;
+    uintptr_t page_size = (uintptr_t)raw_page_size;
+    uintptr_t raw_start = (uintptr_t)address;
+    if (raw_start > UINTPTR_MAX - (uintptr_t)size) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    uintptr_t raw_end = raw_start + (uintptr_t)size;
+    uintptr_t start = raw_start / page_size * page_size;
+    uintptr_t end = raw_end;
+    uintptr_t remainder = raw_end % page_size;
+    if (remainder != 0) {
+        uintptr_t adjustment = page_size - remainder;
+        if (raw_end > UINTPTR_MAX - adjustment) {
+            errno = EOVERFLOW;
+            return -1;
+        }
+        end += adjustment;
+    }
+    return madvise((void *)start, (size_t)(end - start), MADV_FREE_REUSE);
+#else
+    (void)address;
+    (void)size;
+    return 0;
+#endif
+}
+
+int smr_dontneed_memory(void *address, uint64_t size) {
+    if (address == NULL || size == 0 || size > SIZE_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    long raw_page_size = sysconf(_SC_PAGESIZE);
+    if (raw_page_size <= 0) return -1;
+    uintptr_t page_size = (uintptr_t)raw_page_size;
+    uintptr_t raw_start = (uintptr_t)address;
+    if (raw_start > UINTPTR_MAX - (uintptr_t)size) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+    uintptr_t raw_end = raw_start + (uintptr_t)size;
+    uintptr_t start = raw_start;
+    uintptr_t remainder = raw_start % page_size;
+    if (remainder != 0) {
+        uintptr_t adjustment = page_size - remainder;
+        if (adjustment > raw_end - raw_start) return 0;
+        start += adjustment;
+    }
+    uintptr_t end = raw_end / page_size * page_size;
+    if (start >= end) return 0;
+    return madvise((void *)start, (size_t)(end - start), MADV_DONTNEED);
 }
 
 int smr_region_initialize(void *address, uint64_t region_size, uint64_t boot_id, int32_t daemon_pid) {
@@ -553,5 +651,51 @@ uint64_t smr_peak_resident_bytes(void) {
     return (uint64_t)usage.ru_maxrss;
 #else
     return (uint64_t)usage.ru_maxrss * 1024u;
+#endif
+}
+
+uint64_t smr_current_resident_bytes(void) {
+#if defined(__APPLE__)
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    kern_return_t result = task_info(
+        mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &count);
+    return result == KERN_SUCCESS ? (uint64_t)info.resident_size : 0;
+#elif defined(__linux__)
+    FILE *file = fopen("/proc/self/statm", "r");
+    if (file == NULL) return 0;
+    unsigned long total_pages = 0;
+    unsigned long resident_pages = 0;
+    int scanned = fscanf(file, "%lu %lu", &total_pages, &resident_pages);
+    fclose(file);
+    if (scanned != 2) return 0;
+    long page_size = sysconf(_SC_PAGESIZE);
+    return page_size > 0 ? (uint64_t)resident_pages * (uint64_t)page_size : 0;
+#else
+    return 0;
+#endif
+}
+
+uint64_t smr_current_footprint_bytes(void) {
+#if defined(__APPLE__)
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t result = task_info(
+        mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+    return result == KERN_SUCCESS ? (uint64_t)info.phys_footprint : 0;
+#else
+    return smr_current_resident_bytes();
+#endif
+}
+
+uint64_t smr_current_reusable_bytes(void) {
+#if defined(__APPLE__)
+    task_vm_info_data_t info;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    kern_return_t result = task_info(
+        mach_task_self(), TASK_VM_INFO, (task_info_t)&info, &count);
+    return result == KERN_SUCCESS ? (uint64_t)info.reusable : 0;
+#else
+    return 0;
 #endif
 }

@@ -38,6 +38,21 @@ Sizing should include:
 - temporary staging blocks during writes and transformed passes;
 - concurrent read/event references, which delay reuse but do not duplicate blocks.
 
+After the last reference is released, the allocator coalesces the block and advises the
+operating system that complete payload pages are reusable. RSS can remain briefly above
+`memoryUsed()` because reclamation is pressure-driven and shared mappings may be charged
+to more than one process, but repeated acknowledged traffic is bounded instead of retaining
+every historical payload. A received conveyor item is acknowledged only by `finish`, by a
+successful `pass`/`send`, or by the terminal-consumer convenience handler; disconnect alone
+intentionally keeps it for redelivery.
+
+On macOS, raw resident size includes reusable mapped pages and `ru_maxrss` is a lifetime peak;
+neither is proof of a leak. Activity Monitor's memory pressure is better represented by physical
+footprint. The benchmark reports committed bytes, current/peak resident bytes, physical footprint,
+and reusable bytes separately. For an identical acknowledged workload, committed bytes should
+return to the live-data baseline and physical footprint should plateau. Growth in either value
+across completed batches warrants investigation.
+
 No object is silently evicted. Monitor `memoryUsed()` and apply backpressure when operations return `false`.
 
 ## Shutdown and crash recovery

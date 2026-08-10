@@ -6,18 +6,22 @@ package enum BinaryCodable {
   }
 
   package static func encode<T: Codable>(_ value: T) throws -> Data {
-    let encoder = PropertyListEncoder()
-    encoder.outputFormat = .binary
-    return try encoder.encode(Envelope(value: value))
+    try withRuntimeAutoreleasePool {
+      let encoder = PropertyListEncoder()
+      encoder.outputFormat = .binary
+      return try encoder.encode(Envelope(value: value))
+    }
   }
 
   package static func decode<T: Codable>(_ type: T.Type, from bytes: UnsafeRawBufferPointer) throws
     -> T
   {
-    let data = Data(
-      bytesNoCopy: UnsafeMutableRawPointer(mutating: bytes.baseAddress!), count: bytes.count,
-      deallocator: .none)
-    return try PropertyListDecoder().decode(Envelope<T>.self, from: data).value
+    return try withRuntimeAutoreleasePool {
+      let data = Data(
+        bytesNoCopy: UnsafeMutableRawPointer(mutating: bytes.baseAddress!), count: bytes.count,
+        deallocator: .none)
+      return try PropertyListDecoder().decode(Envelope<T>.self, from: data).value
+    }
   }
 }
 

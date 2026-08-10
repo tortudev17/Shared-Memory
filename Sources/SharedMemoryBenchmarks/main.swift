@@ -64,7 +64,9 @@ if ProcessInfo.processInfo.environment["SMR_MEMORY_BYTES"] == nil {
 
 let iterations = max(
   1, Int(ProcessInfo.processInfo.environment["SMR_BENCHMARK_ITERATIONS"] ?? "10000") ?? 10_000)
-let payload = Data(repeating: 0x5a, count: 256)
+let payloadBytes = max(
+  0, Int(ProcessInfo.processInfo.environment["SMR_BENCHMARK_PAYLOAD_BYTES"] ?? "256") ?? 256)
+let payload = Data(repeating: 0x5a, count: payloadBytes)
 let source = SharedMemory(
   creator: true,
   name: "bench-source",
@@ -73,6 +75,8 @@ let source = SharedMemory(
 let middle = SharedMemory(name: "bench-middle")
 let feeder = SharedMemory(name: "bench-feeder")
 guard source.isConnected, middle.isConnected, feeder.isConnected else { exit(2) }
+let initialResidentBytes = smr_current_resident_bytes()
+let initialFootprintBytes = smr_current_footprint_bytes()
 
 let write = measure(iterations: iterations) { index in
   source.write(path: "/bench/value", value: Sample(sequence: index, sentAt: 0, payload: payload))
@@ -112,9 +116,13 @@ source.setReceiveHandler(for: Sample.self) { [weak source] uuid, value in
   if count == iterations { passDrain.signal() }
 }
 for index in 0..<iterations {
-  guard feeder.send(
-    to: "bench-source",
-    values: [Sample(sequence: index, sentAt: DispatchTime.now().uptimeNanoseconds, payload: payload)])
+  guard
+    feeder.send(
+      to: "bench-source",
+      values: [
+        Sample(sequence: index, sentAt: DispatchTime.now().uptimeNanoseconds, payload: payload)
+      ]
+    )
   else { break }
 }
 _ = passDrain.wait(timeout: .now() + 60)
@@ -214,6 +222,19 @@ if let zeroCopy = zeroCopyMeasurement.snapshot() {
   print(
     "zero_copy,logical_bytes=1048576,committed_byte_delta=\(delta),payload_copies_between_stages=0")
 }
-print(
-  "memory,shared_committed_bytes=\(source.memoryUsed()),process_peak_resident_bytes=\(smr_peak_resident_bytes())"
-)
+_ = source.delete(path: "/bench/value")
+for worker in 0..<contenders.count {
+  _ = source.delete(path: "/bench/contention/\(worker)")
+}
+smr_sleep_nanoseconds(150_000_000)
+let memoryFields = [
+  "memory",
+  "shared_committed_bytes=\(source.memoryUsed())",
+  "process_initial_resident_bytes=\(initialResidentBytes)",
+  "process_current_resident_bytes=\(smr_current_resident_bytes())",
+  "process_initial_footprint_bytes=\(initialFootprintBytes)",
+  "process_current_footprint_bytes=\(smr_current_footprint_bytes())",
+  "process_reusable_bytes=\(smr_current_reusable_bytes())",
+  "process_peak_resident_bytes=\(smr_peak_resident_bytes())",
+]
+print(memoryFields.joined(separator: ","))

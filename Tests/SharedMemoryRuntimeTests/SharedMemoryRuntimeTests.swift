@@ -272,6 +272,36 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     XCTAssertEqual(maximumCallbacks.snapshot(), 1)
   }
 
+  func testConsumingReceiveHandlerReclaimsRepeatedSendPayloads() {
+    struct Payload: Codable {
+      let sequence: Int
+      let bytes: Data
+    }
+    let name = "consume-sink-\(UUID().uuidString)"
+    let sink = SharedMemory(name: name)
+    XCTAssertTrue(sink.isConnected)
+    let baseline = environment.root.memoryUsed()
+    let received = DispatchSemaphore(value: 0)
+    let receivedCount = Locked(0)
+    sink.setConsumingReceiveHandler(for: Payload.self) { _, _ in
+      receivedCount.withValue { $0 += 1 }
+      received.signal()
+    }
+    let bytes = Data(repeating: 0xa5, count: 256 << 10)
+    for sequence in 0..<1_000 {
+      XCTAssertTrue(
+        environment.root.send(
+          to: name, values: [Payload(sequence: sequence, bytes: bytes)]))
+      XCTAssertEqual(received.wait(timeout: .now() + 2), .success)
+    }
+    let deadline = smr_monotonic_nanoseconds() + 2_000_000_000
+    while environment.root.memoryUsed() != baseline, smr_monotonic_nanoseconds() < deadline {
+      smr_sleep_nanoseconds(1_000_000)
+    }
+    XCTAssertEqual(receivedCount.snapshot(), 1_000)
+    XCTAssertEqual(environment.root.memoryUsed(), baseline)
+  }
+
   func testUnchangedPassReusesTheExistingSharedPayloadBlock() {
     struct Blob: Codable, Equatable {
       let id: Int

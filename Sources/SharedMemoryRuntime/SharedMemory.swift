@@ -6,6 +6,52 @@ import SharedMemoryCore
 /// `SharedMemory` is the package's only public type. Each logical payload version crosses the
 /// serialization boundary once, then remains in shared memory while it moves through stages.
 public final class SharedMemory: @unchecked Sendable {
+  /// A filesystem value paired with the version used by conditional mutations.
+  public struct Versioned<Value> {
+    public let value: Value
+    public let version: UInt64
+
+    fileprivate init(value: Value, version: UInt64) {
+      self.value = value
+      self.version = version
+    }
+  }
+
+  /// A normalized filesystem path and its current version.
+  public struct PathEntry: Equatable, Sendable {
+    public let path: String
+    public let version: UInt64
+
+    fileprivate init(_ value: FilesystemPathEntry) {
+      path = value.path
+      version = value.version
+    }
+  }
+
+  /// One write or delete in an atomic filesystem transaction.
+  public struct Mutation: Sendable {
+    fileprivate let value: FilesystemMutation
+
+    /// Encodes a value for an atomic write. Zero means the path must be absent.
+    public static func write<T: Codable>(
+      path: String, value: T, expectedVersion: UInt64? = nil
+    ) -> Mutation? {
+      guard let normalized = RuntimeValidation.normalize(path: path), normalized != "/",
+        let payload = try? BinaryCodable.encode(value)
+      else { return nil }
+      return Mutation(
+        value: FilesystemMutation(
+          kind: .write, path: normalized, expectedVersion: expectedVersion, payload: payload))
+    }
+
+    /// Creates a conditional or unconditional delete mutation.
+    public static func delete(path: String, expectedVersion: UInt64? = nil) -> Mutation {
+      Mutation(
+        value: FilesystemMutation(
+          kind: .delete, path: path, expectedVersion: expectedVersion))
+    }
+  }
+
   private let handlers: RuntimeHandlers
   private let client: RuntimeClient?
 
@@ -59,6 +105,19 @@ public final class SharedMemory: @unchecked Sendable {
     }
   }
 
+  /// Installs a typed handler that automatically finishes each successfully decoded item.
+  /// Use this for terminal consumers; use `setReceiveHandler` when passing or sending onward.
+  public func setConsumingReceiveHandler<T: Codable>(
+    for type: T.Type = T.self,
+    _ handler: @escaping (UUID, T) -> Void
+  ) {
+    handlers.receive = { [weak client] uuid, bytes in
+      guard let value = try? BinaryCodable.decode(type, from: bytes) else { return }
+      handler(uuid, value)
+      _ = client?.finish(uuid: uuid)
+    }
+  }
+
   /// Atomically creates or replaces a file, creating parent directories implicitly.
   public func write<T: Codable>(path: String, value: T) -> Bool {
     guard let data = try? BinaryCodable.encode(value) else { return false }
@@ -75,6 +134,30 @@ public final class SharedMemory: @unchecked Sendable {
         })
     else { return nil }
     return result
+  }
+
+  /// Reads and decodes one snapshot together with its current version.
+  public func readVersioned<T: Codable>(path: String) -> Versioned<T>? {
+    client?.withVersionedRead(path: path) { bytes, version in
+      guard let value = try? BinaryCodable.decode(T.self, from: bytes) else { return nil }
+      return Versioned(value: value, version: version)
+    } ?? nil
+  }
+
+  /// Lists exact and descendant paths under a normalized prefix.
+  public func list(prefix: String = "/") -> [PathEntry]? {
+    client?.list(prefix: prefix)?.map(PathEntry.init)
+  }
+
+  /// Deletes a path, optionally only if its current version matches.
+  public func delete(path: String, expectedVersion: UInt64? = nil) -> Bool {
+    client?.delete(path: path, expectedVersion: expectedVersion) == true
+  }
+
+  /// Applies all mutations atomically after validating every condition.
+  public func transaction(_ mutations: [Mutation]) -> Bool {
+    guard !mutations.isEmpty else { return false }
+    return client?.transaction(FilesystemTransaction(mutations: mutations.map(\.value))) == true
   }
 
   /// Advances items to the next conveyor stage as one atomic batch.

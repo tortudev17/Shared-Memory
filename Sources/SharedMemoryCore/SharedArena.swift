@@ -1,3 +1,4 @@
+import CSharedMemory
 import Foundation
 
 package struct ArenaAllocation: Equatable, Sendable {
@@ -93,6 +94,7 @@ package final class SharedArena {
     let allocatedSize: UInt64
     if remainder >= Self.minimumFreeBlock {
       allocatedSize = required
+      reusePages(offset: selected, size: min(header.size, required + Self.headerBytes))
       let remainderOffset = selected + required
       writeHeader(
         at: remainderOffset,
@@ -106,8 +108,10 @@ package final class SharedArena {
       )
       updateFollowingPreviousSize(after: remainderOffset, blockSize: remainder)
       insertFree(remainderOffset)
+      discardPages(offset: remainderOffset, size: remainder)
     } else {
       allocatedSize = header.size
+      reusePages(offset: selected, size: allocatedSize)
     }
     header.size = allocatedSize
     writeHeader(
@@ -209,7 +213,22 @@ package final class SharedArena {
     )
     updateFollowingPreviousSize(after: mergedOffset, blockSize: mergedSize)
     insertFree(mergedOffset)
+    // Once the final lease is gone, the contents of complete payload pages are dead.
+    // Keep the boundary-tag header resident but let the OS reclaim the large shared pages.
+    discardPages(offset: mergedOffset, size: mergedSize)
     return true
+  }
+
+  private func discardPages(offset: UInt64, size: UInt64) {
+    guard size > Self.headerBytes,
+      let start = region.pointer(offset: offset + Self.headerBytes, count: size - Self.headerBytes)
+    else { return }
+    _ = smr_discard_memory(start, size - Self.headerBytes)
+  }
+
+  private func reusePages(offset: UInt64, size: UInt64) {
+    guard size > 0, let start = region.pointer(offset: offset, count: size) else { return }
+    _ = smr_reuse_memory(start, size)
   }
 
   package func validateAllBlocks() -> Bool {

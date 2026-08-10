@@ -52,6 +52,11 @@ Only the daemon mutates the arena. Blocks are aligned to 64 bytes and use 64-byt
 
 Free blocks are organized into logarithmic segregated bins. Allocation is a bin search plus split; release uses boundary tags to coalesce both neighbors in constant time. There is no compaction and no eviction. Fragmentation can therefore cause a correctly reported allocation failure even when aggregate free bytes exceed the requested size.
 
+When a block's final reference is released, complete payload pages inside the coalesced free range
+are marked reusable and marked active again before a later allocation writes them. Clients also
+drop stale page residency after callback bursts. This keeps logical durability unchanged while
+preventing acknowledged historical traffic from remaining active memory indefinitely.
+
 References cover:
 
 - one owner for a filesystem value or live item;

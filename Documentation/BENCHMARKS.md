@@ -19,7 +19,9 @@ If `SMR_INSTANCE_ID` is absent, the executable creates a PID-scoped benchmark da
 - `spsc_queue`: one in-process shared-ring push/pop round trip.
 - `throughput`: sequential write payload bytes/s and four-client daemon contention operations/s.
 - `zero_copy`: committed-byte delta while an unchanged 1 MiB item moves stages.
-- `memory`: shared committed arena bytes and process peak resident bytes.
+- `memory`: shared committed arena bytes plus initial/current resident size, macOS physical
+  footprint, reusable pages, and process peak resident size. Peak resident size never decreases;
+  use committed bytes and physical footprint to judge repeated-run retention.
 
 Receive latency includes queueing when the benchmark intentionally submits faster than the callback drains. This is useful for throughput behavior; run a smaller iteration count for unloaded tail latency.
 

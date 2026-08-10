@@ -106,6 +106,15 @@ package final class MappedRegion: @unchecked Sendable {
     guard contains(offset: offset, count: count), offset <= UInt64(Int.max) else { return nil }
     return baseAddress.advanced(by: Int(offset))
   }
+
+  package func dontNeed(offset: UInt64, count: UInt64) {
+    guard count > 0, let address = pointer(offset: offset, count: count) else { return }
+    _ = smr_dontneed_memory(address, count)
+  }
+
+  package func dontNeedHeap() {
+    dontNeed(offset: heapOffset, count: heapSize)
+  }
 }
 
 package enum UUIDBits {

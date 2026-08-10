@@ -131,6 +131,33 @@ final class SharedMemoryABITests: XCTestCase {
   }
 }
 
+final class DaemonStateLifecycleTests: XCTestCase {
+  func testEmptyTransientClientMetadataIsRemovedOnUnregister() throws {
+    let fixture = RegionFixture()
+    let state = try XCTUnwrap(
+      DaemonState(region: fixture.region, configuration: PipelineConfiguration(nil)))
+    let slot = try XCTUnwrap(fixture.region.slot(at: 0))
+    XCTAssertEqual(smr_slot_claim(slot), 1)
+    XCTAssertEqual(
+      "transient".withCString { smr_slot_prepare(slot, smr_current_pid(), 91, $0) }, 1)
+
+    var register = SMRRequest()
+    register.sequence = 1
+    register.opcode = RuntimeCommand.register.rawValue
+    XCTAssertEqual(state.handle(slotIndex: 0, slot: slot, request: register).status, 1)
+    XCTAssertEqual(state.bucketCount(), 1)
+    XCTAssertEqual(state.knownNameCount(), 1)
+
+    var unregister = SMRRequest()
+    unregister.sequence = 2
+    unregister.opcode = RuntimeCommand.unregister.rawValue
+    XCTAssertEqual(state.handle(slotIndex: 0, slot: slot, request: unregister).status, 1)
+    XCTAssertEqual(state.connectionCount(), 0)
+    XCTAssertEqual(state.bucketCount(), 0)
+    XCTAssertEqual(state.knownNameCount(), 0)
+  }
+}
+
 final class BinaryFormatTests: XCTestCase {
   func testBatchFramingRoundTripsAndRejectsTruncation() throws {
     let values = [Data([1, 2, 3]), Data(), Data(repeating: 9, count: 128)]

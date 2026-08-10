@@ -147,6 +147,7 @@ package final class RuntimeClient: @unchecked Sendable {
       path: normalized
     )
     if response?.succeeded != true { _ = performRequest(command: .abandon, arg0: staged.block) }
+    region.dontNeed(offset: staged.payload, count: UInt64(data.count))
     return response?.succeeded == true
   }
 
@@ -205,6 +206,7 @@ package final class RuntimeClient: @unchecked Sendable {
     let response = performRequest(
       command: .transaction, arg0: staged.block, arg1: UInt64(data.count))
     if response?.succeeded != true { _ = performRequest(command: .abandon, arg0: staged.block) }
+    region.dontNeed(offset: staged.payload, count: UInt64(data.count))
     return response?.succeeded == true
   }
 
@@ -257,6 +259,7 @@ package final class RuntimeClient: @unchecked Sendable {
       target: target
     )
     if response?.succeeded != true { _ = performRequest(command: .abandon, arg0: allocation.block) }
+    region.dontNeed(offset: allocation.payload, count: UInt64(byteCount))
     return response?.succeeded == true
   }
 
@@ -268,6 +271,7 @@ package final class RuntimeClient: @unchecked Sendable {
       arg1: UInt64(data.count)
     )
     if response?.succeeded != true { _ = performRequest(command: .abandon, arg0: staged.block) }
+    region.dontNeed(offset: staged.payload, count: UInt64(data.count))
     return response?.succeeded == true
   }
 
@@ -298,9 +302,18 @@ package final class RuntimeClient: @unchecked Sendable {
     eventQueue.async { [self] in
       defer { eventGroup.leave() }
       var idle = 0
+      var lastEvent = smr_monotonic_nanoseconds()
+      var needsMappingTrim = false
       while !stateLock.withLock({ stopped }) {
         if pollEvent() {
           idle = 0
+          lastEvent = smr_monotonic_nanoseconds()
+          needsMappingTrim = true
+        } else if needsMappingTrim,
+          smr_monotonic_nanoseconds() &- lastEvent >= 100_000_000
+        {
+          region.dontNeedHeap()
+          needsMappingTrim = false
         } else if idle < 2_000 {
           smr_cpu_relax()
           idle += 1
@@ -308,6 +321,7 @@ package final class RuntimeClient: @unchecked Sendable {
           smr_sleep_nanoseconds(50_000)
         }
       }
+      if needsMappingTrim { region.dontNeedHeap() }
     }
   }
 
@@ -333,19 +347,23 @@ package final class RuntimeClient: @unchecked Sendable {
         return false
       }
       pendingEvent = nil
-      defer { _ = performRequest(command: .releaseLease, arg0: event.allocation_offset) }
+      defer {
+        _ = performRequest(command: .releaseLease, arg0: event.allocation_offset)
+      }
       guard event.payload_size <= UInt64(Int.max),
         let pointer = region.pointer(offset: event.payload_offset, count: event.payload_size)
       else { return true }
       let uuid = UUIDBits.join(high: event.uuid_high, low: event.uuid_low)
-      callback(uuid, UnsafeRawBufferPointer(start: pointer, count: Int(event.payload_size)))
+      withRuntimeAutoreleasePool {
+        callback(uuid, UnsafeRawBufferPointer(start: pointer, count: Int(event.payload_size)))
+      }
     case .notification:
       guard let path = handlers.path(for: event.value), let callback = handlers.notification else {
         pendingEvent = event
         return false
       }
       pendingEvent = nil
-      callback(path)
+      withRuntimeAutoreleasePool { callback(path) }
     }
     return true
   }

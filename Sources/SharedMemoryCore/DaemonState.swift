@@ -79,7 +79,10 @@ private final class ConnectionRecord {
   var pendingNotificationCount: Int { notifications.count - notificationHead }
 
   func compactNotificationsIfNeeded() {
-    if notificationHead > 1_024, notificationHead * 2 > notifications.count {
+    if notificationHead == notifications.count, notificationHead > 0 {
+      notifications.removeAll(keepingCapacity: false)
+      notificationHead = 0
+    } else if notificationHead > 1_024, notificationHead * 2 > notifications.count {
       notifications.removeFirst(notificationHead)
       notificationHead = 0
     }
@@ -296,6 +299,10 @@ package final class DaemonState {
 
   package func itemCount() -> Int { items.count }
 
+  package func bucketCount() -> Int { buckets.count }
+
+  package func knownNameCount() -> Int { knownNames.count }
+
   private func register(slotIndex: Int, slot: UnsafeMutableRawPointer, sequence: UInt64)
     -> SMRResponse
   {
@@ -333,6 +340,10 @@ package final class DaemonState {
     connections[connection.slotIndex] = nil
     if connectionsByName[connection.name] === connection {
       connectionsByName.removeValue(forKey: connection.name)
+    }
+    if stagePositions[connection.name] == nil, buckets[connection.name]?.count == 0 {
+      buckets.removeValue(forKey: connection.name)
+      knownNames.remove(connection.name)
     }
   }
 
@@ -394,13 +405,15 @@ package final class DaemonState {
     else { return false }
     files.removeValue(forKey: path)
     _ = arena.release(record.allocationOffset)
+    compactFilesIfNeeded()
     enqueueNotifications(paths: [path])
     return true
   }
 
   private func transaction(connection: ConnectionRecord, request: SMRRequest) -> Bool {
-    guard let staging = takeStaging(
-      connection: connection, blockOffset: request.arg0, byteCount: request.arg1),
+    guard
+      let staging = takeStaging(
+        connection: connection, blockOffset: request.arg0, byteCount: request.arg1),
       request.arg1 <= UInt64(Int.max),
       let pointer = region.pointer(offset: staging.payloadOffset, count: request.arg1)
     else {
@@ -492,6 +505,7 @@ package final class DaemonState {
       }
     }
     for record in retired { _ = arena.release(record.allocationOffset) }
+    compactFilesIfNeeded()
     enqueueNotifications(paths: paths)
     return true
   }
@@ -724,6 +738,23 @@ package final class DaemonState {
     item.previous = nil
     item.next = nil
     items.removeValue(forKey: item.uuid)
+    compactItemsIfNeeded()
+  }
+
+  private func compactFilesIfNeeded() {
+    guard files.capacity > 1_024, files.count * 4 < files.capacity else { return }
+    var compacted: [String: FileRecord] = [:]
+    compacted.reserveCapacity(files.count)
+    for (path, record) in files { compacted[path] = record }
+    files = compacted
+  }
+
+  private func compactItemsIfNeeded() {
+    guard items.capacity > 1_024, items.count * 4 < items.capacity else { return }
+    var compacted: [UUID: ItemRecord] = [:]
+    compacted.reserveCapacity(items.count)
+    for (uuid, item) in items { compacted[uuid] = item }
+    items = compacted
   }
 
   private func checkpoint(to diskPath: String) -> Bool {

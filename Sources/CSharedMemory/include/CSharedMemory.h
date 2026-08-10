@@ -80,6 +80,9 @@ int smr_region_unlink(const char *name);
 int smr_bootstrap_lock(const char *path);
 void smr_bootstrap_unlock(int fd);
 int smr_lock_memory(void *address, uint64_t size);
+int smr_discard_memory(void *address, uint64_t size);
+int smr_reuse_memory(void *address, uint64_t size);
+int smr_dontneed_memory(void *address, uint64_t size);
 
 int smr_region_initialize(
     void *address,
@@ -148,6 +151,9 @@ uint32_t smr_crc32_extend(uint32_t previous_crc, const void *bytes, uint64_t cou
 int32_t smr_error_code(void);
 int smr_bytes_equal(const void *left, const void *right, uint64_t count);
 uint64_t smr_peak_resident_bytes(void);
+uint64_t smr_current_resident_bytes(void);
+uint64_t smr_current_footprint_bytes(void);
+uint64_t smr_current_reusable_bytes(void);
 
 #ifdef __cplusplus
 }

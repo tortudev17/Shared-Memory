@@ -53,7 +53,9 @@ package enum DaemonServer {
         guard slotState == SMR_SLOT_CLAIMING || slotState == SMR_SLOT_ACTIVE else { continue }
         var request = SMRRequest()
         if smr_daemon_take_request(slot, &request) == 1 {
-          var response = state.handle(slotIndex: index, slot: slot, request: request)
+          var response = withRuntimeAutoreleasePool {
+            state.handle(slotIndex: index, slot: slot, request: request)
+          }
           smr_daemon_complete_request(slot, &response)
           didWork = true
         }
