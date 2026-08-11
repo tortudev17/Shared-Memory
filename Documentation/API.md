@@ -9,18 +9,21 @@ public init(
     creator: Bool = false,
     name: String,
     conveyor: [[String]]? = nil,
-    memoryLimitGB: Int = -1
+    memoryLimitGB: Int = -1,
+    debug: Bool = false
 )
 ```
 
 `name` is unique among connected clients and is limited to 127 UTF-8 bytes. An empty, duplicate, or overlong name produces a disconnected instance; inspect `isConnected`. Initialization is intentionally non-throwing to match the requested façade.
 
-A creator may install zero to three conveyors. Every conveyor is a non-empty ordered list, stage names are globally unique, and a stage name is also the client name that owns that bucket. Non-creators ignore `conveyor` and `memoryLimitGB`.
+A creator may install zero to three conveyors. Every conveyor is a non-empty ordered list, stage names are globally unique, and a stage name is also the client name that owns that bucket. Non-creators ignore `conveyor` and `memoryLimitGB`. When `debug` is `true`, failed public operations also print a diagnostic to standard error while keeping their usual `false` or `nil` return value. Debug logging is disabled by default.
 
 ## Filesystem
 
 ```swift
 func write<T: Codable>(path: String, value: T?) -> Bool
+func read(path: String) -> Data?
+func read<T: Codable>(path: String, as type: T.Type) -> T?
 func read<T: Codable>(path: String) -> T?
 func readVersioned<T: Codable>(path: String) -> Versioned<T>?
 func list(prefix: String = "/") -> [PathEntry]?
@@ -30,7 +33,7 @@ func checkpoint(path: String) -> Bool
 
 Paths must be absolute UTF-8 Unix paths of at most 1,023 bytes. Repeated separators and `.` are normalized. `..` may move toward the root but cannot escape it. The root itself is not a file.
 
-`write` is copy-on-commit: serialization and staging complete before the daemon replaces the file record. An old payload remains valid while any read lease exists. Missing parent directories are implicit. Pass `nil` to delete an existing path; it returns `false` when the path is absent. `read` returns `nil` for a missing path, invalid path, daemon failure, type mismatch, or corrupt encoding.
+`write` is copy-on-commit: serialization and staging complete before the daemon replaces the file record. An old payload remains valid while any read lease exists. Missing parent directories are implicit. Pass `nil` to delete an existing path; it returns `false` when the path is absent. Calling `read(path:)` without a contextual type returns the encoded bytes as an owned `Data` snapshot; use `withUnsafeBytes` for a temporary raw-buffer view. `read(path:as:)` decodes as the explicitly supplied `Codable` type. The inferred generic overload remains available for source compatibility. Reads return `nil` for a missing path, invalid path, daemon failure, type mismatch, or corrupt encoding.
 
 `readVersioned` returns the same complete snapshot with its file version.
 `list` returns exact/prefix descendants sorted by normalized path. Conditional
@@ -114,4 +117,4 @@ func disconnect()
 
 `disconnect` synchronously unregisters the client and stops its callback executor. It never finishes bucket items; constructing a new client with the same name redelivers them. Deinitialization calls `disconnect` automatically, but explicit use is preferable when reconnect timing matters.
 
-All mutating methods return `false` for disconnected clients, serialization failure, invalid input, rejected ownership, full memory, or daemon failure. The no-logging design deliberately leaves detailed diagnostics to tests and application-level policy.
+All mutating methods return `false` for disconnected clients, serialization failure, invalid input, rejected ownership, full memory, or daemon failure. Set `debug: true` during initialization to additionally print failures to standard error.

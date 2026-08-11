@@ -64,6 +64,8 @@ Filesystem and notifications use ordinary absolute Unix paths:
 ```swift
 _ = decoder.write(path: "/cache/models/current", value: modelMetadata)
 let metadata: ModelMetadata? = decoder.read(path: "/cache/models/current")
+let explicitMetadata = decoder.read(path: "/cache/models/current", as: ModelMetadata.self)
+let rawData = decoder.read(path: "/cache/models/current")
 let versioned: SharedMemory.Versioned<ModelMetadata>? =
     decoder.readVersioned(path: "/cache/models/current")
 let files = decoder.list(prefix: "/cache/models")
@@ -84,6 +86,11 @@ _ = decoder.notify(path: "/cache/models/current")
 
 _ = decoder.checkpoint(path: "/var/backups/runtime.smr")
 ```
+
+With no contextual return type, `read(path:)` returns an owned `Data` snapshot of the raw encoded
+bytes. Pass `as: SomeCodableType.self` to decode explicitly. Initialize with `debug: true` to print
+failed operations to standard error in addition to receiving the normal `false` or `nil` result;
+debug output is off by default.
 
 ## Daemon startup
 

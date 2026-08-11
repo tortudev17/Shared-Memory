@@ -54,6 +54,7 @@ public final class SharedMemory: @unchecked Sendable {
 
   private let handlers: RuntimeHandlers
   private let client: RuntimeClient?
+  private let debug: Bool
 
   /// Called serially, in bucket arrival order, whenever this client's stage receives an item.
   /// The buffer is a borrowed, zero-copy view and is valid only for the duration of the call.
@@ -77,10 +78,12 @@ public final class SharedMemory: @unchecked Sendable {
     creator: Bool = false,
     name: String,
     conveyor: [[String]]? = nil,
-    memoryLimitGB: Int = -1
+    memoryLimitGB: Int = -1,
+    debug: Bool = false
   ) {
     let handlers = RuntimeHandlers()
     self.handlers = handlers
+    self.debug = debug
     client = RuntimeClient(
       creator: creator,
       name: name,
@@ -88,6 +91,9 @@ public final class SharedMemory: @unchecked Sendable {
       memoryLimitGB: memoryLimitGB,
       handlers: handlers
     )
+    if debug, client?.isConnected != true {
+      reportError("failed to connect client '\(name)'")
+    }
   }
 
   deinit {
@@ -99,8 +105,11 @@ public final class SharedMemory: @unchecked Sendable {
     for type: T.Type = T.self,
     _ handler: @escaping (UUID, T) -> Void
   ) {
-    handlers.receive = { uuid, bytes in
-      guard let value = try? BinaryCodable.decode(type, from: bytes) else { return }
+    handlers.receive = { [weak self] uuid, bytes in
+      guard let value = try? BinaryCodable.decode(type, from: bytes) else {
+        self?.reportError("failed to decode received value as \(type)")
+        return
+      }
       handler(uuid, value)
     }
   }
@@ -111,20 +120,27 @@ public final class SharedMemory: @unchecked Sendable {
     for type: T.Type = T.self,
     _ handler: @escaping (UUID, T) -> Void
   ) {
-    handlers.receive = { [weak client] uuid, bytes in
-      guard let value = try? BinaryCodable.decode(type, from: bytes) else { return }
+    handlers.receive = { [weak client, weak self] uuid, bytes in
+      guard let value = try? BinaryCodable.decode(type, from: bytes) else {
+        self?.reportError("failed to decode received value as \(type)")
+        return
+      }
       handler(uuid, value)
-      _ = client?.finish(uuid: uuid)
+      if client?.finish(uuid: uuid) != true {
+        self?.reportError("failed to finish consumed item \(uuid)")
+      }
     }
   }
 
   /// Atomically creates or replaces a file, or removes it when `value` is `nil`.
   public func write<T: Codable>(path: String, value: T?) -> Bool {
     guard let value else {
-      return client?.delete(path: path, expectedVersion: nil) == true
+      return checked(client?.delete(path: path, expectedVersion: nil) == true, "delete '\(path)'")
     }
-    guard let data = try? BinaryCodable.encode(value) else { return false }
-    return client?.write(path: path, data: data) == true
+    guard let data = try? BinaryCodable.encode(value) else {
+      return failed("encode value for '\(path)'")
+    }
+    return checked(client?.write(path: path, data: data) == true, "write '\(path)'")
   }
 
   /// Removes a file when it exists.
@@ -132,38 +148,67 @@ public final class SharedMemory: @unchecked Sendable {
   /// This overload lets callers delete with `write(path: value: nil)` without
   /// providing a type. It returns `false` when the path is absent.
   public func write(path: String, value: Never?) -> Bool {
-    client?.delete(path: path, expectedVersion: nil) == true
+    checked(client?.delete(path: path, expectedVersion: nil) == true, "delete '\(path)'")
   }
 
-  /// Reads and decodes one complete snapshot, or returns `nil` when the path is absent or invalid.
-  public func read<T: Codable>(path: String) -> T? {
+  /// Reads one complete snapshot as owned raw bytes.
+  ///
+  /// `Data` owns the snapshot, so it remains valid after this method returns. Use
+  /// `withUnsafeBytes` when an `UnsafeRawBufferPointer` view is needed.
+  public func read(path: String) -> Data? {
+    guard let data = client?.withRead(path: path, { Data($0) }) else {
+      reportError("failed to read '\(path)'")
+      return nil
+    }
+    return data
+  }
+
+  /// Reads and decodes one complete snapshot as the explicitly supplied type.
+  public func read<T: Codable>(path: String, as type: T.Type) -> T? {
     guard
       let result = client?.withRead(
         path: path,
         { bytes in
-          try? BinaryCodable.decode(T.self, from: bytes)
+          try? BinaryCodable.decode(type, from: bytes)
         })
-    else { return nil }
+    else {
+      reportError("failed to read or decode '\(path)' as \(type)")
+      return nil
+    }
     return result
+  }
+
+  /// Reads and decodes one complete snapshot using the type inferred by the caller.
+  /// Prefer `read(path:as:)` in new code when an explicit type is clearer.
+  public func read<T: Codable>(path: String) -> T? {
+    read(path: path, as: T.self)
   }
 
   /// Reads and decodes one snapshot together with its current version.
   public func readVersioned<T: Codable>(path: String) -> Versioned<T>? {
-    client?.withVersionedRead(path: path) { bytes, version in
+    let result: Versioned<T>? = client?.withVersionedRead(path: path) { bytes, version in
       guard let value = try? BinaryCodable.decode(T.self, from: bytes) else { return nil }
       return Versioned(value: value, version: version)
     } ?? nil
+    if result == nil { reportError("failed to read or decode versioned value at '\(path)'") }
+    return result
   }
 
   /// Lists exact and descendant paths under a normalized prefix.
   public func list(prefix: String = "/") -> [PathEntry]? {
-    client?.list(prefix: prefix)?.map(PathEntry.init)
+    guard let entries = client?.list(prefix: prefix)?.map(PathEntry.init) else {
+      reportError("failed to list '\(prefix)'")
+      return nil
+    }
+    return entries
   }
 
   /// Applies all mutations atomically after validating every condition.
   public func transaction(_ mutations: [Mutation]) -> Bool {
-    guard !mutations.isEmpty else { return false }
-    return client?.transaction(FilesystemTransaction(mutations: mutations.map(\.value))) == true
+    guard !mutations.isEmpty else { return failed("apply an empty transaction") }
+    return checked(
+      client?.transaction(FilesystemTransaction(mutations: mutations.map(\.value))) == true,
+      "apply transaction")
   }
 
   /// Advances items to the next conveyor stage as one atomic batch.
@@ -175,9 +220,9 @@ public final class SharedMemory: @unchecked Sendable {
     do {
       for item in items { encoded.append(try BinaryCodable.encode(item.value)) }
     } catch {
-      return false
+      return failed("encode values for pass: \(error)")
     }
-    return client?.pass(uuids: items.map(\.uuid), encoded: encoded) == true
+    return checked(client?.pass(uuids: items.map(\.uuid), encoded: encoded) == true, "pass items")
   }
 
   /// Moves values directly to another known stage, preserving delivered UUIDs oldest-first.
@@ -187,19 +232,19 @@ public final class SharedMemory: @unchecked Sendable {
     do {
       for value in values { encoded.append(try BinaryCodable.encode(value)) }
     } catch {
-      return false
+      return failed("encode values for send: \(error)")
     }
-    return client?.send(to: to, encoded: encoded) == true
+    return checked(client?.send(to: to, encoded: encoded) == true, "send items to '\(to)'")
   }
 
   /// Writes a CRC-protected binary snapshot of the in-memory filesystem to disk atomically.
   public func checkpoint(path: String) -> Bool {
-    client?.checkpoint(path: path) == true
+    checked(client?.checkpoint(path: path) == true, "checkpoint to '\(path)'")
   }
 
   /// Permanently removes an item from UUID tracking and releases its payload when unreferenced.
   public func finish(uuid: UUID) -> Bool {
-    client?.finish(uuid: uuid) == true
+    checked(client?.finish(uuid: uuid) == true, "finish \(uuid)")
   }
 
   /// Returns bytes currently committed in the shared arena, including allocation headers.
@@ -215,6 +260,22 @@ public final class SharedMemory: @unchecked Sendable {
   /// Subscribes this instance's `notificationHandler` to exact changes at `path`.
   @discardableResult
   public func notify(path: String) -> Bool {
-    client?.subscribe(path: path) == true
+    checked(client?.subscribe(path: path) == true, "subscribe to '\(path)'")
+  }
+
+  private func checked(_ success: Bool, _ operation: @autoclosure () -> String) -> Bool {
+    guard success else { return failed(operation()) }
+    return true
+  }
+
+  private func failed(_ operation: String) -> Bool {
+    reportError("failed to \(operation)")
+    return false
+  }
+
+  private func reportError(_ message: String) {
+    guard debug else { return }
+    let line = "SharedMemory error: \(message)\n"
+    FileHandle.standardError.write(Data(line.utf8))
   }
 }
