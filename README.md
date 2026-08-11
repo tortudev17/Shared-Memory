@@ -75,7 +75,7 @@ if let versioned,
        expectedVersion: versioned.version) {
     _ = decoder.transaction([replacement])
 }
-_ = decoder.delete(path: "/cache/models/obsolete", expectedVersion: oldVersion)
+_ = decoder.write(path: "/cache/models/obsolete", value: nil as ModelMetadata?)
 
 decoder.notificationHandler = { path in
     // Runs serially on the client's receive executor.

@@ -118,8 +118,14 @@ public final class SharedMemory: @unchecked Sendable {
     }
   }
 
-  /// Atomically creates or replaces a file, creating parent directories implicitly.
-  public func write<T: Codable>(path: String, value: T) -> Bool {
+  /// Atomically creates or replaces a file, or removes it when `value` is `nil`.
+  ///
+  /// A delete succeeds only when the path currently exists. Pass a typed optional,
+  /// such as `value: nil as Settings?`, when there is no value to infer the type from.
+  public func write<T: Codable>(path: String, value: T?) -> Bool {
+    guard let value else {
+      return client?.delete(path: path, expectedVersion: nil) == true
+    }
     guard let data = try? BinaryCodable.encode(value) else { return false }
     return client?.write(path: path, data: data) == true
   }
@@ -147,11 +153,6 @@ public final class SharedMemory: @unchecked Sendable {
   /// Lists exact and descendant paths under a normalized prefix.
   public func list(prefix: String = "/") -> [PathEntry]? {
     client?.list(prefix: prefix)?.map(PathEntry.init)
-  }
-
-  /// Deletes a path, optionally only if its current version matches.
-  public func delete(path: String, expectedVersion: UInt64? = nil) -> Bool {
-    client?.delete(path: path, expectedVersion: expectedVersion) == true
   }
 
   /// Applies all mutations atomically after validating every condition.

@@ -20,22 +20,21 @@ A creator may install zero to three conveyors. Every conveyor is a non-empty ord
 ## Filesystem
 
 ```swift
-func write<T: Codable>(path: String, value: T) -> Bool
+func write<T: Codable>(path: String, value: T?) -> Bool
 func read<T: Codable>(path: String) -> T?
 func readVersioned<T: Codable>(path: String) -> Versioned<T>?
 func list(prefix: String = "/") -> [PathEntry]?
-func delete(path: String, expectedVersion: UInt64? = nil) -> Bool
 func transaction(_ mutations: [Mutation]) -> Bool
 func checkpoint(path: String) -> Bool
 ```
 
 Paths must be absolute UTF-8 Unix paths of at most 1,023 bytes. Repeated separators and `.` are normalized. `..` may move toward the root but cannot escape it. The root itself is not a file.
 
-`write` is copy-on-commit: serialization and staging complete before the daemon replaces the file record. An old payload remains valid while any read lease exists. Missing parent directories are implicit. `read` returns `nil` for a missing path, invalid path, daemon failure, type mismatch, or corrupt encoding.
+`write` is copy-on-commit: serialization and staging complete before the daemon replaces the file record. An old payload remains valid while any read lease exists. Missing parent directories are implicit. Pass a typed `nil` value (for example, `nil as Settings?`) to delete an existing path; it returns `false` when the path is absent. `read` returns `nil` for a missing path, invalid path, daemon failure, type mismatch, or corrupt encoding.
 
 `readVersioned` returns the same complete snapshot with its file version.
 `list` returns exact/prefix descendants sorted by normalized path. Conditional
-deletes and mutations compare their expected versions before changing
+Transaction mutations compare their expected versions before changing
 anything. For transaction mutations, `nil` is unconditional, zero requires an
 absent path, and a positive expected version requires an exact match.
 `transaction` validates every mutation and capacity requirement,

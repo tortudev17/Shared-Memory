@@ -105,7 +105,7 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     XCTAssertFalse(environment.root.write(path: "relative", value: expected))
   }
 
-  func testVersionedListDeleteAndConditionalTransaction() throws {
+  func testVersionedListWriteNilAndConditionalTransaction() throws {
     let prefix = "/extended/\(UUID().uuidString)"
     let first = prefix + "/first"
     let second = prefix + "/second"
@@ -138,8 +138,8 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     let stale = try XCTUnwrap(
       SharedMemory.Mutation.write(path: first, value: 12, expectedVersion: initial.version))
     XCTAssertFalse(environment.root.transaction([stale]))
-    XCTAssertFalse(environment.root.delete(path: first, expectedVersion: initial.version))
-    XCTAssertTrue(environment.root.delete(path: first, expectedVersion: changed.version))
+    XCTAssertTrue(environment.root.write(path: first, value: nil as Int?))
+    XCTAssertFalse(environment.root.write(path: first, value: nil as Int?))
     let missing: Int? = environment.root.read(path: first)
     XCTAssertNil(missing)
 
