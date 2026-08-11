@@ -222,9 +222,9 @@ if let zeroCopy = zeroCopyMeasurement.snapshot() {
   print(
     "zero_copy,logical_bytes=1048576,committed_byte_delta=\(delta),payload_copies_between_stages=0")
 }
-_ = source.write(path: "/bench/value", value: nil as Sample?)
+_ = source.write(path: "/bench/value", value: nil)
 for worker in 0..<contenders.count {
-  _ = source.write(path: "/bench/contention/\(worker)", value: nil as Sample?)
+  _ = source.write(path: "/bench/contention/\(worker)", value: nil)
 }
 smr_sleep_nanoseconds(150_000_000)
 let memoryFields = [

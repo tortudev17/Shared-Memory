@@ -119,15 +119,20 @@ public final class SharedMemory: @unchecked Sendable {
   }
 
   /// Atomically creates or replaces a file, or removes it when `value` is `nil`.
-  ///
-  /// A delete succeeds only when the path currently exists. Pass a typed optional,
-  /// such as `value: nil as Settings?`, when there is no value to infer the type from.
   public func write<T: Codable>(path: String, value: T?) -> Bool {
     guard let value else {
       return client?.delete(path: path, expectedVersion: nil) == true
     }
     guard let data = try? BinaryCodable.encode(value) else { return false }
     return client?.write(path: path, data: data) == true
+  }
+
+  /// Removes a file when it exists.
+  ///
+  /// This overload lets callers delete with `write(path: value: nil)` without
+  /// providing a type. It returns `false` when the path is absent.
+  public func write(path: String, value: Never?) -> Bool {
+    client?.delete(path: path, expectedVersion: nil) == true
   }
 
   /// Reads and decodes one complete snapshot, or returns `nil` when the path is absent or invalid.

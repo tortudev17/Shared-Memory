@@ -138,8 +138,8 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     let stale = try XCTUnwrap(
       SharedMemory.Mutation.write(path: first, value: 12, expectedVersion: initial.version))
     XCTAssertFalse(environment.root.transaction([stale]))
-    XCTAssertTrue(environment.root.write(path: first, value: nil as Int?))
-    XCTAssertFalse(environment.root.write(path: first, value: nil as Int?))
+    XCTAssertTrue(environment.root.write(path: first, value: nil))
+    XCTAssertFalse(environment.root.write(path: first, value: nil))
     let missing: Int? = environment.root.read(path: first)
     XCTAssertNil(missing)
 
