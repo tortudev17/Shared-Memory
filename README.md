@@ -133,3 +133,4 @@ The default region is 256 MiB. A positive `memoryLimitGB` is honored when a crea
 - [Deployment and operations](Documentation/OPERATIONS.md)
 - [Benchmarks](Documentation/BENCHMARKS.md)
 - [Test coverage](Documentation/TESTING.md)
+- [Python filesystem client](Documentation/PYTHON.md)

@@ -3,6 +3,8 @@
 daemon/target/
 .toolchains/
 .DS_Store
+__pycache__/
+*.py[cod]
 *.log
 runtime/
 state/
