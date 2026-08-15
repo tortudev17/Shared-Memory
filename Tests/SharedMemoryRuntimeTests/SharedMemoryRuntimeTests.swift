@@ -43,7 +43,7 @@ private final class IntegrationEnvironment: @unchecked Sendable {
       name: "test-root",
       conveyor: [
         ["source", "middle", "sink"],
-        ["reconnect-source", "reconnect-sink"],
+        ["reconnect-source", "middle", "reconnect-sink"],
         ["send-source", "send-sink"],
       ]
     )
@@ -205,6 +205,60 @@ final class SharedMemoryRuntimeTests: XCTestCase {
     XCTAssertEqual(values.snapshot(), [10, 11, 12])
     XCTAssertEqual(Set(ids.snapshot()).count, 1)
     XCTAssertEqual(successes.snapshot(), [true, true, true])
+  }
+
+  func testSharedWorkerRoutesEachUUIDAlongItsOriginalConveyor() {
+    let firstSource = SharedMemory(name: "source")
+    let secondSource = SharedMemory(name: "reconnect-source")
+    let sharedWorker = SharedMemory(name: "middle")
+    let firstSink = SharedMemory(name: "sink")
+    let secondSink = SharedMemory(name: "reconnect-sink")
+    XCTAssertTrue(
+      firstSource.isConnected && secondSource.isConnected && sharedWorker.isConnected
+        && firstSink.isConnected && secondSink.isConnected)
+
+    let sharedDeliveries = expectation(description: "shared worker receives both conveyors")
+    sharedDeliveries.expectedFulfillmentCount = 2
+    let sharedItems = Locked<[(UUID, Int)]>([])
+    firstSource.setReceiveHandler(for: Int.self) { [weak firstSource] uuid, value in
+      XCTAssertTrue(firstSource?.pass([(uuid, value + 10)]) == true)
+    }
+    secondSource.setReceiveHandler(for: Int.self) { [weak secondSource] uuid, value in
+      XCTAssertTrue(secondSource?.pass([(uuid, value + 20)]) == true)
+    }
+    sharedWorker.setReceiveHandler(for: Int.self) { uuid, value in
+      sharedItems.withValue { $0.append((uuid, value)) }
+      sharedDeliveries.fulfill()
+    }
+
+    let completed = expectation(description: "both UUIDs reach their own sinks")
+    completed.expectedFulfillmentCount = 2
+    let firstResults = Locked<[(UUID, Int)]>([])
+    let secondResults = Locked<[(UUID, Int)]>([])
+    firstSink.setReceiveHandler(for: Int.self) { [weak firstSink] uuid, value in
+      firstResults.withValue { $0.append((uuid, value)) }
+      XCTAssertTrue(firstSink?.finish(uuid: uuid) == true)
+      completed.fulfill()
+    }
+    secondSink.setReceiveHandler(for: Int.self) { [weak secondSink] uuid, value in
+      secondResults.withValue { $0.append((uuid, value)) }
+      XCTAssertTrue(secondSink?.finish(uuid: uuid) == true)
+      completed.fulfill()
+    }
+
+    XCTAssertTrue(environment.root.send(to: "source", values: [1]))
+    XCTAssertTrue(environment.root.send(to: "reconnect-source", values: [2]))
+    wait(for: [sharedDeliveries], timeout: 5)
+
+    let items = sharedItems.snapshot()
+    XCTAssertEqual(items.count, 2)
+    XCTAssertTrue(sharedWorker.pass(items.map { ($0.0, $0.1 + 100) }))
+    wait(for: [completed], timeout: 5)
+
+    XCTAssertEqual(firstResults.snapshot().map(\.1), [111])
+    XCTAssertEqual(secondResults.snapshot().map(\.1), [122])
+    XCTAssertEqual(Set(firstResults.snapshot().map(\.0)), Set(items.filter { $0.1 == 11 }.map(\.0)))
+    XCTAssertEqual(Set(secondResults.snapshot().map(\.0)), Set(items.filter { $0.1 == 22 }.map(\.0)))
   }
 
   func testPassRequiresTheDeliveredUUIDAndCanAdvanceOutOfOrder() {

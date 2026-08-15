@@ -16,7 +16,7 @@ public init(
 
 `name` is unique among connected clients and is limited to 127 UTF-8 bytes. An empty, duplicate, or overlong name produces a disconnected instance; inspect `isConnected`. Initialization is intentionally non-throwing to match the requested façade.
 
-A creator may install zero to three conveyors. Every conveyor is a non-empty ordered list, stage names are globally unique, and a stage name is also the client name that owns that bucket. Non-creators ignore `conveyor` and `memoryLimitGB`. When `debug` is `true`, failed public operations also print a diagnostic to standard error while keeping their usual `false` or `nil` return value. Debug logging is disabled by default.
+A creator may install zero to three conveyors. Every conveyor is a non-empty ordered list, and a stage name is also the client name that owns that bucket. A name may occur once in each of multiple conveyors, but it may start at most one conveyor; UUID metadata keeps shared workers on the conveyor where each item originated. Repeating a name within one conveyor is invalid. Non-creators ignore `conveyor` and `memoryLimitGB`. When `debug` is `true`, failed public operations also print a diagnostic to standard error while keeping their usual `false` or `nil` return value. Debug logging is disabled by default.
 
 ## Filesystem
 
@@ -68,6 +68,8 @@ For `pass`, every value is paired with a UUID. A first-stage client may use an u
 - Unmatched existing items stay in the caller's bucket.
 
 `pass` atomically places results in the next stage. It returns `false` if any UUID is duplicated, foreign, or not yet delivered (except unused UUIDs introduced by the first stage); for a client outside a conveyor; at a final stage; for invalid data; or with insufficient memory. `send` atomically places results in a known stage's bucket and returns `false` for an unknown target. Empty batches succeed when the route is valid and perform no mutation.
+
+When one worker belongs to multiple conveyors, `pass` resolves the next stage separately for each UUID, so one atomic batch may fan out to different destinations. A new direct `send` to a repeated worker is accepted only when its conveyor is unambiguous (the worker starts one conveyor or has only one occurrence); existing UUID-backed items retain their conveyor when the target occurs in it.
 
 `finish` is explicit acknowledgement and reclamation. Only the current owner can finish an item. Event and read leases may delay physical block reclamation for a few microseconds after logical finish.
 

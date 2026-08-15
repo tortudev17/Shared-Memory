@@ -10,11 +10,13 @@ package struct PipelineConfiguration: Codable, Equatable, Sendable {
 
   package func validated() -> PipelineConfiguration? {
     guard pipelines.count <= 3 else { return nil }
-    var names = Set<String>()
+    var startingNames = Set<String>()
     for pipeline in pipelines {
       guard !pipeline.isEmpty else { return nil }
+      guard startingNames.insert(pipeline[0]).inserted else { return nil }
+      var namesInPipeline = Set<String>()
       for name in pipeline {
-        guard RuntimeValidation.validName(name), names.insert(name).inserted else {
+        guard RuntimeValidation.validName(name), namesInPipeline.insert(name).inserted else {
           return nil
         }
       }

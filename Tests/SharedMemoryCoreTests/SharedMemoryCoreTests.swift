@@ -242,9 +242,12 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertNil(RuntimeValidation.normalize(path: "relative"))
   }
 
-  func testConveyorsAreLimitedAndStageNamesAreUnique() {
+  func testConveyorsAllowSharedWorkersButRequireUniqueStarts() {
     XCTAssertNotNil(PipelineConfiguration([["a", "b"], ["c"]]).validated())
+    XCTAssertNotNil(PipelineConfiguration([["abcd", "a", "b"], ["dcab", "h", "a"]]).validated())
+    XCTAssertNotNil(PipelineConfiguration([["a", "b"], ["c", "a"]]).validated())
     XCTAssertNil(PipelineConfiguration([["a"], ["a"]]).validated())
+    XCTAssertNil(PipelineConfiguration([["a", "b", "a"]]).validated())
     XCTAssertNil(PipelineConfiguration([["a"], ["b"], ["c"], ["d"]]).validated())
     XCTAssertNil(PipelineConfiguration([[]]).validated())
   }

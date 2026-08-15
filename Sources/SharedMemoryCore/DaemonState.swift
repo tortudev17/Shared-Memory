@@ -52,6 +52,16 @@ private struct Bucket {
   var count = 0
 }
 
+private struct StagePosition {
+  let pipeline: Int
+  let stage: Int
+}
+
+private struct TransferRoute {
+  let destination: String
+  let position: StagePosition
+}
+
 private struct PendingNotification {
   let subscription: UInt64
 }
@@ -95,7 +105,7 @@ package final class DaemonState {
   package let region: MappedRegion
   package let arena: SharedArena
   private var pipelines: [[String]]
-  private var stagePositions: [String: (pipeline: Int, stage: Int)] = [:]
+  private var stagePositions: [String: [StagePosition]] = [:]
   private var files: [String: FileRecord] = [:]
   private var items: [UUID: ItemRecord] = [:]
   private var buckets: [String: Bucket] = [:]
@@ -558,27 +568,19 @@ package final class DaemonState {
   private func transfer(connection: ConnectionRecord, request: SMRRequest, directTarget: String?)
     -> Bool
   {
-    let destination: String
-    let position: (pipeline: Int, stage: Int)
-    let mayIntroduceWithPass: Bool
     if let directTarget {
       guard RuntimeValidation.validTarget(directTarget), knownNames.contains(directTarget) else {
         abandonStagingIfPresent(connection: connection, blockOffset: request.arg0)
         return false
       }
-      destination = directTarget
-      position = stagePositions[destination] ?? (pipeline: -1, stage: -1)
-      mayIntroduceWithPass = false
     } else {
-      guard let current = stagePositions[connection.name],
-        current.stage + 1 < pipelines[current.pipeline].count
+      guard stagePositions[connection.name]?.contains(where: { position in
+        position.stage + 1 < pipelines[position.pipeline].count
+      }) == true
       else {
         abandonStagingIfPresent(connection: connection, blockOffset: request.arg0)
         return false
       }
-      destination = pipelines[current.pipeline][current.stage + 1]
-      position = (current.pipeline, current.stage + 1)
-      mayIntroduceWithPass = current.stage == 0
     }
     guard
       let allocation = takeStaging(
@@ -602,23 +604,50 @@ package final class DaemonState {
       return true
     }
     let advancing: [UUID]
+    let routes: [TransferRoute]
     if directTarget == nil {
       let uuids = payloads.compactMap(\.uuid)
-      guard uuids.count == payloads.count, Set(uuids).count == uuids.count,
-        uuids.allSatisfy({ uuid in
-          if let item = items[uuid] {
-            return item.owner == connection.name
-              && item.deliveredGeneration == connection.generation
-          }
-          // The first stage may introduce work directly with pass. Later stages must
-          // still pass only items that were delivered to them.
-          return mayIntroduceWithPass
-        })
-      else {
+      guard uuids.count == payloads.count, Set(uuids).count == uuids.count else {
         _ = arena.release(allocation.blockOffset)
         return false
       }
+      var resolvedRoutes: [TransferRoute] = []
+      resolvedRoutes.reserveCapacity(uuids.count)
+      let startingPosition = stagePositions[connection.name]?.first(where: { $0.stage == 0 })
+      for uuid in uuids {
+        let current: StagePosition
+        if let item = items[uuid] {
+          guard item.owner == connection.name,
+            item.deliveredGeneration == connection.generation
+          else {
+            _ = arena.release(allocation.blockOffset)
+            return false
+          }
+          current = StagePosition(pipeline: item.pipelineIndex, stage: item.stageIndex)
+        } else {
+          // Only a first-stage occurrence may introduce an unused UUID.
+          guard let startingPosition else {
+            _ = arena.release(allocation.blockOffset)
+            return false
+          }
+          current = startingPosition
+        }
+        guard current.pipeline >= 0, current.pipeline < pipelines.count,
+          current.stage >= 0, current.stage < pipelines[current.pipeline].count,
+          pipelines[current.pipeline][current.stage] == connection.name,
+          current.stage + 1 < pipelines[current.pipeline].count
+        else {
+          _ = arena.release(allocation.blockOffset)
+          return false
+        }
+        let next = StagePosition(pipeline: current.pipeline, stage: current.stage + 1)
+        resolvedRoutes.append(
+          TransferRoute(
+            destination: pipelines[next.pipeline][next.stage],
+            position: next))
+      }
       advancing = uuids
+      routes = resolvedRoutes
     } else {
       guard payloads.allSatisfy({ $0.uuid == nil }) else {
         _ = arena.release(allocation.blockOffset)
@@ -626,6 +655,17 @@ package final class DaemonState {
       }
       advancing = deliveredItems(
         in: connection.name, generation: connection.generation, limit: payloads.count)
+      var resolvedRoutes: [TransferRoute] = []
+      resolvedRoutes.reserveCapacity(payloads.count)
+      for index in payloads.indices {
+        let existing = index < advancing.count ? items[advancing[index]] : nil
+        guard let route = directRoute(to: directTarget!, existingItem: existing) else {
+          _ = arena.release(allocation.blockOffset)
+          return false
+        }
+        resolvedRoutes.append(route)
+      }
+      routes = resolvedRoutes
     }
     var reusesExistingPayload = [Bool](repeating: false, count: payloads.count)
     for index in 0..<min(advancing.count, payloads.count) {
@@ -645,11 +685,12 @@ package final class DaemonState {
     }
     for index in payloads.indices {
       let payload = payloads[index]
+      let route = routes[index]
       if index < advancing.count, let item = items[advancing[index]] {
         remove(item)
-        item.owner = destination
-        item.pipelineIndex = position.pipeline
-        item.stageIndex = position.stage
+        item.owner = route.destination
+        item.pipelineIndex = route.position.pipeline
+        item.stageIndex = route.position.stage
         if !reusesExistingPayload[index] {
           _ = arena.release(item.allocationOffset)
           item.allocationOffset = allocation.blockOffset
@@ -658,25 +699,47 @@ package final class DaemonState {
         }
         item.deliveredGeneration = 0
         items[item.uuid] = item
-        append(item, to: destination)
+        append(item, to: route.destination)
       } else {
         // A pass from the first stage supplies the UUID for newly introduced work.
         // send creates UUIDs itself because its payloads intentionally have no UUID.
         let uuid = directTarget == nil ? advancing[index] : UUID()
         let item = ItemRecord(
           uuid: uuid,
-          owner: destination,
-          pipelineIndex: position.pipeline,
-          stageIndex: position.stage,
+          owner: route.destination,
+          pipelineIndex: route.position.pipeline,
+          stageIndex: route.position.stage,
           allocationOffset: allocation.blockOffset,
           payloadOffset: payload.payloadOffset,
           payloadSize: payload.payloadSize
         )
         items[uuid] = item
-        append(item, to: destination)
+        append(item, to: route.destination)
       }
     }
     return true
+  }
+
+  private func directRoute(to destination: String, existingItem: ItemRecord?) -> TransferRoute? {
+    let positions = stagePositions[destination] ?? []
+    if let existingItem,
+      let position = positions.first(where: { $0.pipeline == existingItem.pipelineIndex })
+    {
+      return TransferRoute(destination: destination, position: position)
+    }
+    if let startingPosition = positions.first(where: { $0.stage == 0 }) {
+      return TransferRoute(destination: destination, position: startingPosition)
+    }
+    if positions.count == 1 {
+      return TransferRoute(destination: destination, position: positions[0])
+    }
+    if positions.isEmpty {
+      return TransferRoute(
+        destination: destination, position: StagePosition(pipeline: -1, stage: -1))
+    }
+    // A new item sent directly to a repeated non-start worker has no UUID history
+    // from which to infer its conveyor.
+    return nil
   }
 
   private func takeStaging(connection: ConnectionRecord, blockOffset: UInt64, byteCount: UInt64)
@@ -777,7 +840,8 @@ package final class DaemonState {
     stagePositions.removeAll(keepingCapacity: true)
     for (pipelineIndex, pipeline) in pipelines.enumerated() {
       for (stageIndex, stage) in pipeline.enumerated() {
-        stagePositions[stage] = (pipelineIndex, stageIndex)
+        stagePositions[stage, default: []].append(
+          StagePosition(pipeline: pipelineIndex, stage: stageIndex))
         if buckets[stage] == nil { buckets[stage] = Bucket() }
         knownNames.insert(stage)
       }
